@@ -1,0 +1,11 @@
+1. U Bristol
+
+Page 71- figure 3.7 (Data processing chain of Ti radar)
+
+Section 3.3.4.2 Point Cloud- this section tells about data parsing and figure is impt
+
+2. 2nd Bristol
+
+This will help idea of literature review of HAR
+
+3. Minto paper will also help for radar fundamental
