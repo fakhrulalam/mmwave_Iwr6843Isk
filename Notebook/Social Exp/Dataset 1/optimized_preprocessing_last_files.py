@@ -119,7 +119,7 @@ def process_dataset(base_path, people_folder):
 
 # ========== Main ==========
 def main():
-    base_path = r"C:\Users\14052\Desktop\Research\Research\3D_People_tracking\Github\TI_6843\Fall 25\Notebook\Social Exp\Dataset 1\Dataset 1 (PC)"
+    base_path = r"C:\Users\14052\Desktop\Research\Research\3D_People_tracking\Github\TI_6843\Fall 25\Social Exp Data"
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     for people in ["2 People", "3 People"]:
