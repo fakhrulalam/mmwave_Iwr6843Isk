@@ -32,7 +32,8 @@ class RangeDopplerPlayback(QMainWindow):
         self.use_mps = True  # Use m/s instead of km/h
 
         # Dataset path
-        self.dataset_root = Path(__file__).parent / "Range-doppler Data\Single Activity Data\Dataset 1"
+        self.dataset_root = Path(__file__).parent / "Social Exp Data\Dataset 2 (RD)\2 People" 
+
 
         # Setup UI
         self.setup_ui()
