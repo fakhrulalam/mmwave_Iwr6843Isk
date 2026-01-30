@@ -1,0 +1,6 @@
+total_samples: 28
+n_features_original: 50
+n_features_selected: 50
+n_folds: 5
+behaviors: ['Approaching', 'Sitting', 'Splitting', 'Standing', 'Walking_togather']
+classes: ['Approaching', 'Sitting', 'Splitting', 'Standing', 'Walking_togather']

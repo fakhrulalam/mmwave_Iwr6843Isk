@@ -18,6 +18,7 @@ class RangeDopplerPlayback(QMainWindow):
 
         # Data variables
         self.current_activity = None
+        self.activity_map = {}  # display name -> Path to sample folder
         self.heatmaps = []
         self.current_frame = 0
         self.is_playing = False
@@ -31,8 +32,11 @@ class RangeDopplerPlayback(QMainWindow):
         self.grid_size = 250  # Grid resolution for interpolation
         self.use_mps = True  # Use m/s instead of km/h
 
-        # Dataset path
-        self.dataset_root = Path(__file__).parent / "Range-doppler Data\Single Activity Data\Dataset 1" 
+        # Dataset path: default to the Social Behaviour root; allow override via CLI arg
+        if len(sys.argv) > 1:
+            self.dataset_root = Path(sys.argv[1]).expanduser().resolve()
+        else:
+            self.dataset_root = (Path(__file__).parent / "Research Data" / "Social Behaviour").resolve()
 
 
         # Setup UI
@@ -192,23 +196,33 @@ class RangeDopplerPlayback(QMainWindow):
         main_layout.addWidget(self.status_label)
 
     def load_activities(self):
-        """Load available activities from dataset"""
+        """Load available activities/samples from dataset (two-level folder: Activity/Sample)"""
         if not self.dataset_root.exists():
             self.status_label.setText(f"Error: Dataset path not found: {self.dataset_root}")
             return
 
+        self.activity_map.clear()
         activities = []
-        for activity_dir in sorted(self.dataset_root.iterdir()):
-            if activity_dir.is_dir():
-                rd_file = activity_dir / "range_doppler.csv"
-                if rd_file.exists():
-                    activities.append(activity_dir.name)
 
+        # Expect structure: dataset_root / <Activity> / <Sample> / range_doppler.csv
+        for activity_dir in sorted(self.dataset_root.iterdir()):
+            if not activity_dir.is_dir():
+                continue
+            for sample_dir in sorted(activity_dir.iterdir()):
+                if not sample_dir.is_dir():
+                    continue
+                rd_file = sample_dir / "range_doppler.csv"
+                if rd_file.exists():
+                    display_name = f"{activity_dir.name}/{sample_dir.name}"
+                    self.activity_map[display_name] = sample_dir
+                    activities.append(display_name)
+
+        self.activity_combo.clear()
         if activities:
-            self.activity_combo.addItems(activities)
-            self.status_label.setText(f"Found {len(activities)} activities")
+            self.activity_combo.addItems(sorted(activities))
+            self.status_label.setText(f"Found {len(activities)} samples")
         else:
-            self.status_label.setText("No activities with range_doppler.csv found")
+            self.status_label.setText("No samples with range_doppler.csv found")
 
     def on_activity_changed(self, activity_name):
         """Handle activity selection change"""
@@ -221,7 +235,12 @@ class RangeDopplerPlayback(QMainWindow):
 
     def load_range_doppler_data(self, activity_name):
         """Load range-Doppler data from CSV file"""
-        csv_path = self.dataset_root / activity_name / "range_doppler.csv"
+        sample_dir = self.activity_map.get(activity_name)
+        if sample_dir is None:
+            self.status_label.setText(f"Error: Activity not found: {activity_name}")
+            return
+
+        csv_path = sample_dir / "range_doppler.csv"
 
         if not csv_path.exists():
             self.status_label.setText(f"Error: File not found: {csv_path}")
