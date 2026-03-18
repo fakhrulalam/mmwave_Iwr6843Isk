@@ -684,7 +684,7 @@ class RangeDopplerPlayback(QMainWindow):
             self.status_label.setText(f"Video export failed: {e}")
 
     def export_whole_plot(self):
-        """Export one single playback-matched plot aggregated from all loaded frames."""
+        """Export one single playback-matched plot using sum aggregation over all loaded frames."""
         if not self.heatmaps:
             self.status_label.setText("Error: No data loaded to export")
             return
@@ -703,10 +703,10 @@ class RangeDopplerPlayback(QMainWindow):
             norm = (interp - self.min_value) / denom
             processed.append(norm.astype(np.float32))
 
-        whole = np.mean(np.stack(processed, axis=0), axis=0)
+        whole = np.sum(np.stack(processed, axis=0), axis=0)
 
         safe_name = (self.current_activity or "session").replace("/", "_").replace("\\", "_")
-        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback_whole_mean.png"
+        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback_whole_sum.png"
         save_path_str, _ = QFileDialog.getSaveFileName(
             self,
             "Save Whole-Session Plot",
@@ -744,7 +744,7 @@ class RangeDopplerPlayback(QMainWindow):
         ax.set_xlabel('Range [m]')
         ax.set_ylabel('Doppler [m/s]')
         cb = fig.colorbar(im, ax=ax)
-        cb.set_label('Mean Normalized Signal')
+        cb.set_label('Summed Normalized Signal')
         fig.tight_layout()
         fig.savefig(save_path, dpi=150)
         plt.close(fig)
