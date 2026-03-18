@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "C:/Users/14052/anaconda3/envs/mmwave/python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
+}

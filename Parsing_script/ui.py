@@ -1313,13 +1313,55 @@ class MainWindow(QMainWindow, QWidget):
         self.table.setRowCount(0)
 
         # Get a list of available serial ports
-        ports = serial.tools.list_ports.comports()
+        ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
         idx = 0
 
+        if not ports:
+            self.command_textbox.appendPlainText("No serial ports detected. Check USB cable/power and click Refresh Serial Ports.")
+            return
+
+        # Identify likely TI mmWave ports when available.
+        # Typical pair names are:
+        # - command: XDS110 Class Auxiliary Data Port
+        # - data: XDS110 Class Application/User UART
+        data_index = None
+        command_index = None
+        for i, port in enumerate(ports):
+            desc = (port.description or "").lower()
+            hwid = (port.hwid or "").lower()
+
+            # TI mmWave default mapping:
+            # - Application/User UART -> Data port
+            # - Auxiliary Data Port      -> Command port
+            is_application_uart = ("application" in desc) or ("user uart" in desc)
+            is_auxiliary_port = "auxiliary" in desc
+
+            if data_index is None and is_application_uart:
+                data_index = i
+            if command_index is None and (is_auxiliary_port or "command" in desc):
+                command_index = i
+
+            # Generic fallback hints for non-standard labels.
+            if data_index is None and ("uart" in desc and "auxiliary" not in desc):
+                data_index = i
+            if command_index is None and ("xds110" in hwid and is_auxiliary_port):
+                command_index = i
+
+        # Fallback for unknown descriptions: select last two ports.
+        if len(ports) >= 2:
+            if command_index is None:
+                command_index = len(ports) - 2
+            if data_index is None:
+                data_index = len(ports) - 1
+
+        # Ensure command and data are not auto-selected as the same port.
+        if command_index is not None and data_index is not None and command_index == data_index:
+            alternative_indexes = [i for i in range(len(ports)) if i != command_index]
+            if alternative_indexes:
+                data_index = alternative_indexes[-1]
+
         # Populate the table with serial ports
-        for i in range(len(ports) - 2, len(ports)): # on Linux
-        # for i in range(0, len(ports)): # on Window
-            port = ports[i]
+        for i, port in enumerate(ports):
             self.table.insertRow(idx)
             self.table.setItem(idx, 0, QTableWidgetItem(port.device))
 
@@ -1329,18 +1371,16 @@ class MainWindow(QMainWindow, QWidget):
             self.table.setCellWidget(idx, 1, data_checkbox)
             self.table.setCellWidget(idx, 2, command_checkbox)
 
-            # Set the checkboxes automatically but did not work on Window os because of the port ordering system
-            first_port = len(ports) - 2
-            second_port = len(ports) - 1
-            if port.description != "n/a" and i == first_port:
+            # Auto-select detected command/data ports when available.
+            if i == command_index:
                 command_checkbox.setChecked(True)
-            elif port.description != "n/a" and i == second_port:
+            if i == data_index:
                 data_checkbox.setChecked(True)
 
             # Populate other columns
-            self.table.setItem(idx, 3, QTableWidgetItem(port.description))
-            self.table.setItem(idx, 4, QTableWidgetItem(port.manufacturer))
-            self.table.setItem(idx, 5, QTableWidgetItem(port.hwid))
+            self.table.setItem(idx, 3, QTableWidgetItem(port.description or ""))
+            self.table.setItem(idx, 4, QTableWidgetItem(port.manufacturer or ""))
+            self.table.setItem(idx, 5, QTableWidgetItem(port.hwid or ""))
             idx += 1
 
     def refresh_serial_ports(self):
@@ -1353,6 +1393,9 @@ class MainWindow(QMainWindow, QWidget):
 
         # Get the number of rows in the table
         num_rows = self.table.rowCount()
+        selected_count = 0
+        selected_data_ports = []
+        selected_command_ports = []
 
         # Iterate over the rows
         for row in range(num_rows):
@@ -1365,9 +1408,26 @@ class MainWindow(QMainWindow, QWidget):
 
             # Check if the Data or Command checkboxes are checked and connect accordingly
             if command_checkbox.isChecked():
-                self.connect_to_port(port_name, "Command")
+                selected_count += 1
+                selected_command_ports.append(port_name)
             if data_checkbox.isChecked():
-                self.connect_to_port(port_name, "Data")
+                selected_count += 1
+                selected_data_ports.append(port_name)
+
+        if selected_count == 0:
+            self.command_textbox.appendPlainText("No ports selected. Check one Data and one Command port, then press Connect.")
+            return
+
+        if len(selected_data_ports) != 1 or len(selected_command_ports) != 1:
+            self.command_textbox.appendPlainText("Please select exactly one Data port and one Command port.")
+            return
+
+        if selected_data_ports[0] == selected_command_ports[0]:
+            self.command_textbox.appendPlainText("Data and Command must be different ports. Re-select ports and connect again.")
+            return
+
+        self.connect_to_port(selected_command_ports[0], "Command")
+        self.connect_to_port(selected_data_ports[0], "Data")
 
     def disconnect_ports(self):
         # Disconnect from the data port
@@ -1428,7 +1488,7 @@ class MainWindow(QMainWindow, QWidget):
             # Update UI components
             self.update_circle_widgets()
 
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError, ValueError) as e:
             self.command_textbox.appendPlainText(f"Failed to connect to {connection_type} port: {e}")
 
     def update_circle_widgets(self):

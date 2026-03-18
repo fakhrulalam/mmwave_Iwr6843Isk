@@ -3,23 +3,27 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
-                             QWidget, QPushButton, QLabel, QComboBox, QSlider, QSpinBox)
+                             QWidget, QPushButton, QLabel, QComboBox, QSlider, QSpinBox,
+                             QFileDialog, QInputDialog)
 from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QImage
 import pyqtgraph as pg
 from matplotlib import cm
+import matplotlib.pyplot as plt
 from scipy.ndimage import zoom
 
 
 class RangeDopplerPlayback(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Range-Doppler Heatmap Playback - Dataset 2")
+        self.setWindowTitle("Range-Doppler Heatmap Playback")
         self.setGeometry(100, 100, 1200, 800)
 
         # Data variables
         self.current_activity = None
         self.activity_map = {}  # display name -> Path to sample folder
         self.heatmaps = []
+        self.removed_frame_numbers = []
         self.current_frame = 0
         self.is_playing = False
         self.playback_speed = 100  # milliseconds between frames
@@ -32,11 +36,11 @@ class RangeDopplerPlayback(QMainWindow):
         self.grid_size = 250  # Grid resolution for interpolation
         self.use_mps = True  # Use m/s instead of km/h
 
-        # Dataset path: default to the Social Behaviour root; allow override via CLI arg
+        # Dataset path: default to the Research Data root (broadest coverage); allow override via CLI arg
         if len(sys.argv) > 1:
             self.dataset_root = Path(sys.argv[1]).expanduser().resolve()
         else:
-            self.dataset_root = (Path(__file__).parent / "Research Data" / "Social Behaviour").resolve()
+            self.dataset_root = (Path(__file__).parent / "Research Data").resolve()
 
 
         # Setup UI
@@ -58,12 +62,34 @@ class RangeDopplerPlayback(QMainWindow):
         # Top control panel - Activity and Playback controls
         control_layout = QHBoxLayout()
 
+        # Dataset selector
+        control_layout.addWidget(QLabel("Dataset:"))
+        self.dataset_combo = QComboBox()
+        self.dataset_combo.addItems([
+            "Research Data",
+            "Range-doppler Data/Single Activity Data",
+            "Range-doppler Data/Social Exp Data"
+        ])
+        self.dataset_combo.setMaximumWidth(250)
+        self.dataset_combo.currentTextChanged.connect(self.on_dataset_changed)
+        control_layout.addWidget(self.dataset_combo)
+
+        control_layout.addSpacing(20)
+
         # Activity selector
         control_layout.addWidget(QLabel("Activity:"))
         self.activity_combo = QComboBox()
         self.activity_combo.setMinimumWidth(120)
         self.activity_combo.currentTextChanged.connect(self.on_activity_changed)
         control_layout.addWidget(self.activity_combo)
+
+        self.folder_button = QPushButton("Choose Folder")
+        self.folder_button.clicked.connect(self.choose_dataset_folder)
+        control_layout.addWidget(self.folder_button)
+
+        self.file_button = QPushButton("Open CSV")
+        self.file_button.clicked.connect(self.choose_csv_file)
+        control_layout.addWidget(self.file_button)
 
         control_layout.addSpacing(20)
 
@@ -78,6 +104,17 @@ class RangeDopplerPlayback(QMainWindow):
         self.stop_button.setMinimumWidth(80)
         self.stop_button.clicked.connect(self.stop_playback)
         control_layout.addWidget(self.stop_button)
+
+        # Export single whole-session plot
+        self.export_button = QPushButton("Export Whole Plot")
+        self.export_button.setMinimumWidth(130)
+        self.export_button.clicked.connect(self.export_whole_plot)
+        control_layout.addWidget(self.export_button)
+
+        self.video_button = QPushButton("Save Video")
+        self.video_button.setMinimumWidth(100)
+        self.video_button.clicked.connect(self.export_playback_video)
+        control_layout.addWidget(self.video_button)
 
         control_layout.addSpacing(20)
 
@@ -180,9 +217,15 @@ class RangeDopplerPlayback(QMainWindow):
         # Add colorbar (legend) - optional, comment out if it causes issues
         # Note: ColorBarItem may not be available in older pyqtgraph versions
         try:
+            jet_cmap = plt.get_cmap('jet')
+            jet_rgba = jet_cmap(np.linspace(0, 1, 256))
+            jet_rgb = (jet_rgba[:, :3] * 255).astype(np.ubyte)
+            jet_pos = np.linspace(0.0, 1.0, 256)
+            jet_colormap = pg.ColorMap(jet_pos, jet_rgb)
+
             self.colorbar = pg.ColorBarItem(
                 values=(0, 4096),
-                colorMap='jet',
+                colorMap=jet_colormap,
                 label='Signal Strength'
             )
             self.colorbar.setImageItem(self.heatmap_item)
@@ -196,7 +239,7 @@ class RangeDopplerPlayback(QMainWindow):
         main_layout.addWidget(self.status_label)
 
     def load_activities(self):
-        """Load available activities/samples from dataset (two-level folder: Activity/Sample)"""
+        """Load all available samples by searching for range_doppler.csv recursively."""
         if not self.dataset_root.exists():
             self.status_label.setText(f"Error: Dataset path not found: {self.dataset_root}")
             return
@@ -204,25 +247,26 @@ class RangeDopplerPlayback(QMainWindow):
         self.activity_map.clear()
         activities = []
 
-        # Expect structure: dataset_root / <Activity> / <Sample> / range_doppler.csv
-        for activity_dir in sorted(self.dataset_root.iterdir()):
-            if not activity_dir.is_dir():
-                continue
-            for sample_dir in sorted(activity_dir.iterdir()):
-                if not sample_dir.is_dir():
-                    continue
-                rd_file = sample_dir / "range_doppler.csv"
-                if rd_file.exists():
-                    display_name = f"{activity_dir.name}/{sample_dir.name}"
-                    self.activity_map[display_name] = sample_dir
-                    activities.append(display_name)
+        for rd_file in sorted(self.dataset_root.rglob("range_doppler.csv")):
+            sample_dir = rd_file.parent
+            display_name = str(sample_dir.relative_to(self.dataset_root)).replace("\\", "/")
+            self.activity_map[display_name] = sample_dir
+            activities.append(display_name)
 
+        self.activity_combo.blockSignals(True)
         self.activity_combo.clear()
         if activities:
             self.activity_combo.addItems(sorted(activities))
-            self.status_label.setText(f"Found {len(activities)} samples")
+            self.status_label.setText(f"Found {len(activities)} samples under {self.dataset_root.name}")
+            # Auto-load first activity
+            self.activity_combo.setCurrentIndex(0)
         else:
-            self.status_label.setText("No samples with range_doppler.csv found")
+            self.status_label.setText(f"No range_doppler.csv found under {self.dataset_root}")
+        self.activity_combo.blockSignals(False)
+        
+        # If we have activities, trigger the load for the first one
+        if activities:
+            self.on_activity_changed(sorted(activities)[0])
 
     def on_activity_changed(self, activity_name):
         """Handle activity selection change"""
@@ -232,6 +276,58 @@ class RangeDopplerPlayback(QMainWindow):
         self.stop_playback()
         self.current_activity = activity_name
         self.load_range_doppler_data(activity_name)
+
+    def on_dataset_changed(self, dataset_path):
+        """Handle dataset selection change"""
+        if not dataset_path:
+            return
+        
+        self.stop_playback()
+        self.dataset_root = (Path(__file__).parent / dataset_path).resolve()
+        self.load_activities()
+
+    def choose_dataset_folder(self):
+        """Allow selecting a dataset root folder at runtime."""
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Dataset Root Folder",
+            str(self.dataset_root)
+        )
+        if not selected:
+            return
+
+        self.dataset_root = Path(selected).resolve()
+        self.stop_playback()
+        self.load_activities()
+
+    def choose_csv_file(self):
+        """Allow loading any single range_doppler CSV file directly."""
+        csv_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select range_doppler CSV",
+            str(self.dataset_root),
+            "CSV Files (*.csv)"
+        )
+        if not csv_path:
+            return
+
+        selected_path = Path(csv_path).resolve()
+        if selected_path.name.lower() != "range_doppler.csv":
+            self.status_label.setText("Please select a file named range_doppler.csv")
+            return
+
+        if self.dataset_root in selected_path.parents:
+            key = str(selected_path.parent.relative_to(self.dataset_root)).replace("\\", "/")
+        else:
+            key = selected_path.parent.name
+
+        self.activity_map[key] = selected_path.parent
+
+        existing = [self.activity_combo.itemText(i) for i in range(self.activity_combo.count())]
+        if key not in existing:
+            self.activity_combo.addItem(key)
+
+        self.activity_combo.setCurrentText(key)
 
     def load_range_doppler_data(self, activity_name):
         """Load range-Doppler data from CSV file"""
@@ -254,17 +350,44 @@ class RangeDopplerPlayback(QMainWindow):
 
             # Check if it's long-form data (frame_number, range_bin, doppler_bin, signal_strength)
             if all(col in df.columns for col in ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']):
-                self.heatmaps = self.parse_longform_data(df)
+                heatmaps, frame_numbers = self.parse_longform_data(df)
             else:
-                self.status_label.setText("Error: Unexpected CSV format")
-                return
+                # Fallback for headerless files commonly used in Research Data.
+                raw = pd.read_csv(csv_path, header=None)
+                if raw.shape[1] >= 5:
+                    raw = raw.iloc[:, :5].copy()
+                    raw.columns = ['timestamp', 'frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
+                elif raw.shape[1] == 4:
+                    raw.columns = ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
+                else:
+                    self.status_label.setText("Error: Unexpected CSV format")
+                    return
+
+                raw[['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']] = raw[
+                    ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
+                ].apply(pd.to_numeric, errors='coerce')
+                raw = raw.dropna(subset=['frame_number', 'range_bin', 'doppler_bin', 'signal_strength'])
+                heatmaps, frame_numbers = self.parse_longform_data(raw)
+
+            self.heatmaps, self.removed_frame_numbers = self.filter_anomalous_frames(
+                heatmaps,
+                frame_numbers,
+            )
 
             if self.heatmaps:
                 self.current_frame = 0
                 self.frame_slider.setMaximum(len(self.heatmaps) - 1)
                 self.frame_slider.setValue(0)
                 self.update_display()
-                self.status_label.setText(f"Loaded {len(self.heatmaps)} frames from {activity_name}")
+                if self.removed_frame_numbers:
+                    preview = self.removed_frame_numbers[:8]
+                    suffix = "..." if len(self.removed_frame_numbers) > 8 else ""
+                    self.status_label.setText(
+                        f"Loaded {len(self.heatmaps)} frames from {activity_name} | "
+                        f"removed {len(self.removed_frame_numbers)} anomalous frames {preview}{suffix}"
+                    )
+                else:
+                    self.status_label.setText(f"Loaded {len(self.heatmaps)} frames from {activity_name}")
             else:
                 self.status_label.setText("Error: No heatmaps loaded")
 
@@ -274,8 +397,9 @@ class RangeDopplerPlayback(QMainWindow):
             traceback.print_exc()
 
     def parse_longform_data(self, df):
-        """Parse long-form DataFrame into list of 2D heatmaps"""
+        """Parse long-form DataFrame into list of 2D heatmaps and frame numbers."""
         heatmaps = []
+        frame_numbers = []
 
         # Get dimensions
         max_range_bin = int(df['range_bin'].max())
@@ -300,8 +424,46 @@ class RangeDopplerPlayback(QMainWindow):
             heatmap[range_bins, doppler_bins] = signal_strengths
 
             heatmaps.append(heatmap)
+            frame_numbers.append(int(frame_num))
 
-        return heatmaps
+        return heatmaps, frame_numbers
+
+    def filter_anomalous_frames(self, heatmaps, frame_numbers):
+        """Remove clearly corrupted/saturated frames before playback."""
+        if not heatmaps:
+            return heatmaps, []
+
+        if len(heatmaps) < 5:
+            return heatmaps, []
+
+        means = np.array([h.mean() for h in heatmaps], dtype=np.float32)
+        stds = np.array([h.std() for h in heatmaps], dtype=np.float32)
+        peaks = np.array([h.max() for h in heatmaps], dtype=np.float32)
+        sat_counts = np.array([(h > 60000).sum() for h in heatmaps], dtype=np.float32)
+
+        def robust_abs_z(values):
+            med = np.median(values)
+            mad = np.median(np.abs(values - med))
+            if mad < 1e-9:
+                return np.zeros_like(values)
+            return np.abs((values - med) / (1.4826 * mad))
+
+        z_mean = robust_abs_z(means)
+        z_std = robust_abs_z(stds)
+        z_peak = robust_abs_z(peaks)
+
+        # Keep filtering conservative: remove only clearly corrupted frames.
+        mask = (
+            (sat_counts > 0)
+            | (peaks > 10000)
+            | (stds > 2000)
+            | ((z_peak > 12.0) & (z_std > 12.0) & (z_mean > 12.0))
+        )
+
+        filtered_heatmaps = [h for i, h in enumerate(heatmaps) if not mask[i]]
+        removed_frames = [int(frame_numbers[i]) for i in range(len(frame_numbers)) if mask[i]]
+
+        return filtered_heatmaps, removed_frames
 
     def update_display(self):
         """Update the heatmap display with current frame (matching live radar exactly)"""
@@ -331,11 +493,7 @@ class RangeDopplerPlayback(QMainWindow):
             print(f"Normalized range: min={heatmap_normalized.min():.3f}, max={heatmap_normalized.max():.3f}")
 
         # Create colormap lookup table (jet colormap as in live system)
-        try:
-            cmap = cm.get_cmap('jet')
-        except AttributeError:
-            # For newer matplotlib versions
-            cmap = cm.colormaps.get_cmap('jet')
+        cmap = plt.get_cmap('jet')
         lookup_table = (cmap(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
 
         # Apply lookup table (RGB only, no alpha)
@@ -386,6 +544,7 @@ class RangeDopplerPlayback(QMainWindow):
     def start_playback(self):
         """Start playback"""
         if not self.heatmaps:
+            self.status_label.setText("Error: No data loaded")
             return
 
         self.is_playing = True
@@ -445,6 +604,153 @@ class RangeDopplerPlayback(QMainWindow):
         self.min_spinbox.setValue(min_val)
         self.max_spinbox.setValue(max_val)
 
+    def _grab_plot_rgb_frame(self):
+        """Grab the rendered plot widget as an RGB frame (includes axes and labels)."""
+        pixmap = self.heatmap_plot.grab()
+        qimg = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
+        w = qimg.width()
+        h = qimg.height()
+        bpl = qimg.bytesPerLine()
+        ptr = qimg.bits()
+        ptr.setsize(h * bpl)
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, bpl))
+        arr = arr[:, : (w * 3)].reshape((h, w, 3)).copy()
+        return arr
+
+    def export_playback_video(self):
+        """Export currently loaded playback frames to MP4 or GIF for presentation use."""
+        if not self.heatmaps:
+            self.status_label.setText("Error: No data loaded to export video")
+            return
+
+        safe_name = (self.current_activity or "session").replace("/", "_").replace("\\", "_")
+        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback.mp4"
+        save_path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Playback Video",
+            str(default_path),
+            "MP4 Video (*.mp4);;GIF Animation (*.gif);;All Files (*)",
+        )
+        if not save_path_str:
+            self.status_label.setText("Video export canceled")
+            return
+
+        save_path = Path(save_path_str)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import imageio.v2 as imageio
+        except Exception:
+            self.status_label.setText("Video export needs imageio. Install: pip install imageio imageio-ffmpeg")
+            return
+
+        fps = max(1, int(round(1000.0 / float(self.playback_speed))))
+        self.status_label.setText(f"Exporting video ({len(self.heatmaps)} frames @ {fps} fps)...")
+        QApplication.processEvents()
+
+        was_playing = self.is_playing
+        if was_playing:
+            self.pause_playback()
+
+        original_frame = self.current_frame
+        rgb_frames = []
+
+        for i in range(len(self.heatmaps)):
+            self.current_frame = i
+            self.update_display()
+            QApplication.processEvents()
+            rgb_frames.append(self._grab_plot_rgb_frame())
+
+        self.current_frame = original_frame
+        self.update_display()
+        if was_playing:
+            self.start_playback()
+
+        try:
+            if save_path.suffix.lower() == ".gif":
+                imageio.mimsave(save_path, rgb_frames, duration=1.0 / fps, loop=0)
+            else:
+                imageio.mimsave(save_path, rgb_frames, fps=fps, macro_block_size=None)
+            self.status_label.setText(f"Saved playback video: {save_path}")
+        except Exception as e:
+            if save_path.suffix.lower() != ".gif":
+                fallback = save_path.with_suffix(".gif")
+                try:
+                    imageio.mimsave(fallback, rgb_frames, duration=1.0 / fps, loop=0)
+                    self.status_label.setText(f"MP4 failed ({e}); saved GIF instead: {fallback}")
+                    return
+                except Exception:
+                    pass
+            self.status_label.setText(f"Video export failed: {e}")
+
+    def export_whole_plot(self):
+        """Export one single playback-matched plot aggregated from all loaded frames."""
+        if not self.heatmaps:
+            self.status_label.setText("Error: No data loaded to export")
+            return
+
+        processed = []
+        for frame in self.heatmaps:
+            shifted = np.fft.fftshift(frame, axes=1)
+
+            desired_rows = max(self.grid_size, shifted.shape[0])
+            desired_cols = max(self.grid_size, shifted.shape[1])
+            scale_y = desired_rows / shifted.shape[0]
+            scale_x = desired_cols / shifted.shape[1]
+            interp = zoom(shifted, (scale_y, scale_x), order=1)
+
+            denom = max(self.max_value - self.min_value, 1e-9)
+            norm = (interp - self.min_value) / denom
+            processed.append(norm.astype(np.float32))
+
+        whole = np.mean(np.stack(processed, axis=0), axis=0)
+
+        safe_name = (self.current_activity or "session").replace("/", "_").replace("\\", "_")
+        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback_whole_mean.png"
+        save_path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Whole-Session Plot",
+            str(default_path),
+            "PNG Files (*.png);;All Files (*)",
+        )
+        if not save_path_str:
+            self.status_label.setText("Export canceled")
+            return
+
+        save_path = Path(save_path_str)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        default_title = self.current_activity or ""
+        title_text, ok = QInputDialog.getText(
+            self,
+            "Plot Title",
+            "Enter plot title (leave blank for no title):",
+            text=default_title,
+        )
+        if not ok:
+            self.status_label.setText("Export canceled")
+            return
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+        im = ax.imshow(
+            whole.T,
+            origin='lower',
+            aspect='auto',
+            cmap='jet',
+            extent=[0.0, self.maximum_range, -self.unambiguous_velocity, self.unambiguous_velocity],
+        )
+        if title_text.strip():
+            ax.set_title(title_text.strip())
+        ax.set_xlabel('Range [m]')
+        ax.set_ylabel('Doppler [m/s]')
+        cb = fig.colorbar(im, ax=ax)
+        cb.set_label('Mean Normalized Signal')
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
+        self.status_label.setText(f"Saved whole plot: {save_path}")
+
 
 def main():
     app = QApplication(sys.argv)
@@ -455,3 +761,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

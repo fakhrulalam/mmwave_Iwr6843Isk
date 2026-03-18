@@ -50,6 +50,8 @@ class RadarApplication:
        self.frame_count = 0
        self.start_time_s = None  # Start time in seconds for stopwatch
        self.custom_folder_name = None  # Custom folder name for data
+       self.received_frames = 0
+       self.parsed_frames = 0
 
 
    def _setup_visualizations(self):
@@ -242,6 +244,8 @@ class RadarApplication:
 
                            if not self.data_queue.full():
                                self.data_queue.put(frame_data)
+                               self.received_frames += 1
+                               total_frames += 1
                                # logging.info(f"Complete frame added to queue. Queue size: {self.data_queue.qsize()}")
                            else:
                                logging.warning("Queue is full. Frame not added.")
@@ -296,7 +300,15 @@ class RadarApplication:
                    data = raw_data[magic_word_index:]
                    frame_header = data[:40]
                    parsed_header = self.parser.parse_frame_header(frame_header)
-                   tlv_data = self.parse_tlvs(data[40:], window)
+                   num_tlvs = parsed_header.get("Num TLVs", 0) if parsed_header else 0
+                   tlv_data = self.parse_tlvs(data[40:], window, num_tlvs=num_tlvs)
+                   self.parsed_frames += 1
+
+                   if self.parsed_frames % 20 == 0:
+                       logging.info(
+                           f"Radar parsing active: received_frames={self.received_frames}, "
+                           f"parsed_frames={self.parsed_frames}, queue={self.data_queue.qsize()}"
+                       )
 
 
                    # Handle parsed data with the window passed as a parameter
@@ -318,22 +330,75 @@ class RadarApplication:
            time.sleep(0.01)  # Keep this small for real-time processing
 
 
-   def parse_tlvs(self, tlv_data, window):
+   def parse_tlvs(self, tlv_data, window, num_tlvs=None):
        """Parse TLV data from the payload."""
-       tlv_list = []
-       tlv_index = 0
-       while tlv_index < len(tlv_data):
-           try:
-               tlv_type = int.from_bytes(tlv_data[tlv_index:tlv_index+4], byteorder='little')
-               tlv_length = int.from_bytes(tlv_data[tlv_index+4:tlv_index+8], byteorder='little')
-               tlv_payload = tlv_data[tlv_index+8:tlv_index+8+tlv_length]
-               parsed_tlv = self.parser.parse_tlv(tlv_type, tlv_payload,window)
-               tlv_list.append({'type': tlv_type, 'data': parsed_tlv, 'length': tlv_length, 'payload':tlv_payload})
-               tlv_index += 8 + tlv_length
-           except Exception as e:
-               logging.error(f"Error parsing TLVs at index {tlv_index}: {e}")
-               break
-       return tlv_list
+       target_tlvs = num_tlvs if isinstance(num_tlvs, int) and num_tlvs > 0 else None
+
+       def parse_with_mode(length_includes_header):
+           tlv_list_local = []
+           tlv_index_local = 0
+           parsed_count_local = 0
+
+           while tlv_index_local + 8 <= len(tlv_data):
+               try:
+                   tlv_type = int.from_bytes(tlv_data[tlv_index_local:tlv_index_local + 4], byteorder='little')
+                   tlv_length = int.from_bytes(tlv_data[tlv_index_local + 4:tlv_index_local + 8], byteorder='little')
+
+                   payload_length = tlv_length - 8 if length_includes_header else tlv_length
+                   if payload_length < 0:
+                       break
+
+                   end_index = tlv_index_local + 8 + payload_length
+                   if end_index > len(tlv_data):
+                       break
+
+                   tlv_payload = tlv_data[tlv_index_local + 8:end_index]
+                   try:
+                       parsed_tlv = self.parser.parse_tlv(tlv_type, tlv_payload, window)
+                   except Exception as parse_exc:
+                       logging.warning(f"Skipping TLV type {tlv_type} due to parse error: {parse_exc}")
+                       tlv_index_local = end_index
+                       parsed_count_local += 1
+                       if target_tlvs is not None and parsed_count_local >= target_tlvs:
+                           break
+                       continue
+
+                   tlv_list_local.append({
+                       'type': tlv_type,
+                       'data': parsed_tlv,
+                       'length': tlv_length,
+                       'payload': tlv_payload
+                   })
+
+                   tlv_index_local = end_index
+                   parsed_count_local += 1
+
+                   if target_tlvs is not None and parsed_count_local >= target_tlvs:
+                       break
+               except Exception as e:
+                   logging.error(f"Error parsing TLVs at index {tlv_index_local}: {e}")
+                   break
+
+           return tlv_list_local, parsed_count_local, tlv_index_local
+
+       parsed_header_mode, count_header_mode, consumed_header_mode = parse_with_mode(True)
+       parsed_payload_mode, count_payload_mode, consumed_payload_mode = parse_with_mode(False)
+
+       if target_tlvs is not None:
+           if count_header_mode == target_tlvs and count_payload_mode != target_tlvs:
+               return parsed_header_mode
+           if count_payload_mode == target_tlvs and count_header_mode != target_tlvs:
+               logging.info("TLV parser selected payload-only length mode.")
+               return parsed_payload_mode
+
+       header_score = (count_header_mode, consumed_header_mode)
+       payload_score = (count_payload_mode, consumed_payload_mode)
+       if payload_score > header_score:
+           if count_payload_mode > 0:
+               logging.info("TLV parser selected payload-only length mode.")
+           return parsed_payload_mode
+
+       return parsed_header_mode
 
 
    def handle_data(self, parsed_header, tlv_data, window):
@@ -573,6 +638,7 @@ class RadarApplication:
            noise = np.array([[point['noise']] for point in self.side_info_for_detected_points])
            # print("snr = ", self.snr)
            # print("noise = ", self.noise)
+
 
 
 
