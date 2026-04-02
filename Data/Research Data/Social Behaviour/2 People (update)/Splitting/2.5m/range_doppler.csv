@@ -1,3 +1,4 @@
+timestamp_s,frame_number,range_bin,doppler_bin,signal_strength
 3547.059778,1686,0,0,5188
 3547.059778,1686,0,1,4940
 3547.059778,1686,0,2,3014
