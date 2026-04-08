@@ -111,6 +111,11 @@ class RangeDopplerPlayback(QMainWindow):
         self.export_button.clicked.connect(self.export_whole_plot)
         control_layout.addWidget(self.export_button)
 
+        self.export_activity_button = QPushButton("Export Activity Plot")
+        self.export_activity_button.setMinimumWidth(150)
+        self.export_activity_button.clicked.connect(self.export_activity_plot)
+        control_layout.addWidget(self.export_activity_button)
+
         self.video_button = QPushButton("Save Video")
         self.video_button.setMinimumWidth(100)
         self.video_button.clicked.connect(self.export_playback_video)
@@ -345,34 +350,7 @@ class RangeDopplerPlayback(QMainWindow):
         self.status_label.setText(f"Loading {activity_name}...")
 
         try:
-            # Read CSV file
-            df = pd.read_csv(csv_path)
-
-            # Check if it's long-form data (frame_number, range_bin, doppler_bin, signal_strength)
-            if all(col in df.columns for col in ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']):
-                heatmaps, frame_numbers = self.parse_longform_data(df)
-            else:
-                # Fallback for headerless files commonly used in Research Data.
-                raw = pd.read_csv(csv_path, header=None)
-                if raw.shape[1] >= 5:
-                    raw = raw.iloc[:, :5].copy()
-                    raw.columns = ['timestamp', 'frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
-                elif raw.shape[1] == 4:
-                    raw.columns = ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
-                else:
-                    self.status_label.setText("Error: Unexpected CSV format")
-                    return
-
-                raw[['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']] = raw[
-                    ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
-                ].apply(pd.to_numeric, errors='coerce')
-                raw = raw.dropna(subset=['frame_number', 'range_bin', 'doppler_bin', 'signal_strength'])
-                heatmaps, frame_numbers = self.parse_longform_data(raw)
-
-            self.heatmaps, self.removed_frame_numbers = self.filter_anomalous_frames(
-                heatmaps,
-                frame_numbers,
-            )
+            self.heatmaps, self.removed_frame_numbers = self.load_heatmaps_from_csv(csv_path)
 
             if self.heatmaps:
                 self.current_frame = 0
@@ -395,6 +373,31 @@ class RangeDopplerPlayback(QMainWindow):
             self.status_label.setText(f"Error loading data: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def load_heatmaps_from_csv(self, csv_path):
+        """Load one CSV and return filtered heatmaps plus removed frame numbers."""
+        df = pd.read_csv(csv_path)
+
+        if all(col in df.columns for col in ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']):
+            heatmaps, frame_numbers = self.parse_longform_data(df)
+        else:
+            # Fallback for headerless files commonly used in Research Data.
+            raw = pd.read_csv(csv_path, header=None)
+            if raw.shape[1] >= 5:
+                raw = raw.iloc[:, :5].copy()
+                raw.columns = ['timestamp', 'frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
+            elif raw.shape[1] == 4:
+                raw.columns = ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
+            else:
+                raise ValueError("Unexpected CSV format")
+
+            raw[['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']] = raw[
+                ['frame_number', 'range_bin', 'doppler_bin', 'signal_strength']
+            ].apply(pd.to_numeric, errors='coerce')
+            raw = raw.dropna(subset=['frame_number', 'range_bin', 'doppler_bin', 'signal_strength'])
+            heatmaps, frame_numbers = self.parse_longform_data(raw)
+
+        return self.filter_anomalous_frames(heatmaps, frame_numbers)
 
     def parse_longform_data(self, df):
         """Parse long-form DataFrame into list of 2D heatmaps and frame numbers."""
@@ -689,8 +692,132 @@ class RangeDopplerPlayback(QMainWindow):
             self.status_label.setText("Error: No data loaded to export")
             return
 
+        whole = self.build_summed_plot_data(self.heatmaps)
+
+        safe_name = (self.current_activity or "session").replace("/", "_").replace("\\", "_")
+        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback_whole_sum.png"
+
+        default_title = self.current_activity or ""
+        self.save_sum_plot(whole, default_path, "Save Whole-Session Plot", default_title)
+
+    def export_activity_plot(self):
+        """Export one summed plot for all sessions matching a selected activity name."""
+        if not self.activity_map:
+            self.status_label.setText("Error: No activities available")
+            return
+
+        activity_groups = {}
+        for sample_dir in self.activity_map.values():
+            group_label, _ = self.extract_activity_group_label(sample_dir)
+            activity_groups.setdefault(group_label, []).append(sample_dir)
+
+        activity_names = sorted(activity_groups.keys())
+        if not activity_names:
+            self.status_label.setText("Error: No activity folders found")
+            return
+
+        default_activity = None
+        if self.current_activity in self.activity_map:
+            default_activity, _ = self.extract_activity_group_label(self.activity_map[self.current_activity])
+        default_index = activity_names.index(default_activity) if default_activity in activity_names else 0
+
+        activity_name, ok = QInputDialog.getItem(
+            self,
+            "Select Activity",
+            "Choose activity to aggregate across sessions:",
+            activity_names,
+            default_index,
+            False,
+        )
+        if not ok or not activity_name:
+            self.status_label.setText("Export canceled")
+            return
+
+        matched_dirs = activity_groups.get(activity_name, [])
+        if not matched_dirs:
+            self.status_label.setText(f"Error: No sessions found for activity '{activity_name}'")
+            return
+
+        all_heatmaps = []
+        for sample_dir in matched_dirs:
+            csv_path = sample_dir / "range_doppler.csv"
+            if not csv_path.exists():
+                continue
+            try:
+                heatmaps, _ = self.load_heatmaps_from_csv(csv_path)
+                all_heatmaps.extend(heatmaps)
+            except Exception as e:
+                print(f"Skipping {csv_path}: {e}")
+
+        if not all_heatmaps:
+            self.status_label.setText(f"Error: Could not load valid frames for '{activity_name}'")
+            return
+
+        whole = self.build_summed_plot_data(all_heatmaps)
+
+        safe_name = activity_name.replace("/", "_").replace("\\", "_")
+        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_all_sessions_whole_sum.png"
+        default_title = f"{activity_name} (all sessions)"
+        self.save_sum_plot(whole, default_path, "Save Whole-Activity Plot", default_title)
+        self.status_label.setText(
+            f"Saved whole activity plot for {activity_name} | "
+            f"sessions: {len(matched_dirs)}, frames: {len(all_heatmaps)}"
+        )
+
+    def extract_activity_group_label(self, sample_dir):
+        """Return scope-aware activity label, e.g., 'Single Activity Data | Sitting'."""
+        try:
+            rel_parts = sample_dir.relative_to(self.dataset_root).parts
+        except Exception:
+            rel_parts = sample_dir.parts
+
+        def is_distance_like(name):
+            txt = name.strip().lower().replace(" ", "")
+            if txt.endswith("m"):
+                txt = txt[:-1]
+            if not txt:
+                return False
+            try:
+                float(txt)
+                return True
+            except ValueError:
+                return False
+
+        def is_grouping_folder(name):
+            txt = name.strip().lower()
+            if not txt:
+                return False
+            # Social behavior often has middle folders like "2 People" or "3 people (update)"
+            return "people" in txt
+
+        scope = rel_parts[0].strip() if len(rel_parts) > 0 else self.dataset_root.name
+        activity = None
+
+        for part in reversed(rel_parts):
+            p = part.strip()
+            pl = p.lower()
+            if not p:
+                continue
+            if pl.startswith("dataset"):
+                continue
+            if is_distance_like(p):
+                continue
+            if is_grouping_folder(p):
+                continue
+            if p == scope:
+                continue
+            activity = p
+            break
+
+        if not activity:
+            activity = sample_dir.name
+
+        return f"{scope} | {activity}", activity
+
+    def build_summed_plot_data(self, heatmaps):
+        """Create one summed playback-matched matrix from a list of frame heatmaps."""
         processed = []
-        for frame in self.heatmaps:
+        for frame in heatmaps:
             shifted = np.fft.fftshift(frame, axes=1)
 
             desired_rows = max(self.grid_size, shifted.shape[0])
@@ -703,24 +830,23 @@ class RangeDopplerPlayback(QMainWindow):
             norm = (interp - self.min_value) / denom
             processed.append(norm.astype(np.float32))
 
-        whole = np.sum(np.stack(processed, axis=0), axis=0)
+        return np.sum(np.stack(processed, axis=0), axis=0)
 
-        safe_name = (self.current_activity or "session").replace("/", "_").replace("\\", "_")
-        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback_whole_sum.png"
+    def save_sum_plot(self, whole, default_path, dialog_title, default_title):
+        """Prompt output path/title and save one summed heatmap figure."""
         save_path_str, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Whole-Session Plot",
+            dialog_title,
             str(default_path),
             "PNG Files (*.png);;All Files (*)",
         )
         if not save_path_str:
             self.status_label.setText("Export canceled")
-            return
+            return False
 
         save_path = Path(save_path_str)
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        default_title = self.current_activity or ""
         title_text, ok = QInputDialog.getText(
             self,
             "Plot Title",
@@ -729,7 +855,7 @@ class RangeDopplerPlayback(QMainWindow):
         )
         if not ok:
             self.status_label.setText("Export canceled")
-            return
+            return False
 
         fig, ax = plt.subplots(figsize=(10, 7))
         im = ax.imshow(
@@ -750,6 +876,7 @@ class RangeDopplerPlayback(QMainWindow):
         plt.close(fig)
 
         self.status_label.setText(f"Saved whole plot: {save_path}")
+        return True
 
 
 def main():
