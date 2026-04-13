@@ -26,6 +26,7 @@ class RadarApplication:
        self.parser = RadarDataParser()
        self.radar_visualizer = RadarVisualizer()
        self.stop_event = threading.Event()
+       self.ui_data_lock = threading.Lock()
        # self.window = MainWindow()
        self.window = []
 
@@ -52,8 +53,26 @@ class RadarApplication:
        self.custom_folder_name = None  # Custom folder name for data
        self.received_frames = 0
        self.parsed_frames = 0
+       self.raw_bytes_received = 0
+       self.last_data_preview_hex = ""
+       self.invalid_header_count = 0
+       self.first_candidate_packet_length = 0
+       self._payload_length_mode_logged = False
+       self._alt_tlv_offset_logged = False
 
-
+       # Cache UI table data from worker thread; flush on GUI thread via timer.
+       self.latest_header = None
+       self.latest_statistics = None
+       self.latest_temperature = None
+       self.latest_detected_points = None
+       self.latest_side_info = None
+       self._dirty_header = False
+       self._dirty_statistics = False
+       self._dirty_temperature = False
+       self._dirty_detected_points = False
+       self._dirty_side_info = False
+       self.session_started_at = None
+       self.no_data_warning_issued = False
    def _setup_visualizations(self):
        """Setup plots for visualizing radar data."""
 
@@ -94,7 +113,36 @@ class RadarApplication:
        self.csv_directory = csv_dir
        self.custom_folder_name = folder_name
        self.start_time_s = None  # Will be set on first frame
+       self.frame_count = 0
+       self.data_dir = None
+       self.csv_files = {}
        print(f"✓ CSV logging enabled. Directory: {os.path.abspath(csv_dir)}")
+
+
+   def start_new_session(self, folder_name=None):
+       """Create a fresh output session and reset frame numbering."""
+       if folder_name is not None:
+           self.custom_folder_name = folder_name
+       else:
+           self.custom_folder_name = None
+
+       self.start_time_s = None
+       self.frame_count = 0
+       self.received_frames = 0
+       self.parsed_frames = 0
+       self.raw_bytes_received = 0
+       self.last_data_preview_hex = ""
+       self.invalid_header_count = 0
+       self.first_candidate_packet_length = 0
+       self.session_started_at = time.time()
+       self.no_data_warning_issued = False
+       # Drop any buffered frames from previous session to avoid cross-session bleed.
+       while not self.data_queue.empty():
+           try:
+               self.data_queue.get_nowait()
+           except queue.Empty:
+               break
+
        self._setup_csv_files()
 
 
@@ -108,21 +156,21 @@ class RadarApplication:
        if self.custom_folder_name:
            folder_name = self.custom_folder_name
        else:
-           timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+           timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
            folder_name = f"radar_data_{timestamp}"
 
 
-       # Create Data directory with subfolder
-       data_dir = os.path.join("Data", folder_name)
+       # Create output directory under configured CSV base path.
+       base_dir = self.csv_directory if self.csv_directory else "Data"
+       data_dir = os.path.join(base_dir, folder_name)
        if not os.path.exists(data_dir):
            os.makedirs(data_dir)
            print(f"✓ Created data directory: {os.path.abspath(data_dir)}")
       
        # Define CSV file names in the timestamped Data folder
        self.csv_files = {
-           'detected_points': os.path.join(data_dir, "points_cloud.csv"),
            'range_doppler_heatmap': os.path.join(data_dir, "range_doppler.csv"),
-           'side_info': os.path.join(data_dir, "noise_snr.csv")
+           'merged_points': os.path.join(data_dir, "PointCloud_snr.csv")
        }
 
 
@@ -136,29 +184,24 @@ class RadarApplication:
    def _create_csv_headers(self):
        """Create CSV files with appropriate headers."""
        try:
-           # Detected points CSV (points_cloud.csv)
-           with open(self.csv_files['detected_points'], 'w', newline='') as f:
-               writer = csv.writer(f)
-               writer.writerow(['frame_number', 'point_index', 'x', 'y', 'z', 'doppler', 'range', 'aoa'])
-
-
            # Range-Doppler heatmap CSV
            with open(self.csv_files['range_doppler_heatmap'], 'w', newline='') as f:
                writer = csv.writer(f)
                writer.writerow(['timestamp_s', 'frame_number', 'range_bin', 'doppler_bin', 'signal_strength'])
 
-
-           # Side info CSV (noise_snr.csv)
-           with open(self.csv_files['side_info'], 'w', newline='') as f:
+           # Merged points CSV (points + snr/noise)
+           with open(self.csv_files['merged_points'], 'w', newline='') as f:
                writer = csv.writer(f)
-               writer.writerow(['timestamp_s', 'frame_number', 'point_index', 'snr', 'noise'])
+               writer.writerow([
+                   'timestamp_s', 'frame_number', 'point_index', 'x', 'y', 'z', 'doppler',
+                   'range', 'aoa', 'snr', 'noise'
+               ])
 
 
            logging.info(f"CSV files created in directory: {self.csv_directory}")
            print(f"✓ CSV files created successfully:")
-           print(f"  - detected_points: points_cloud.csv")
            print(f"  - range_doppler_heatmap: range_doppler.csv")
-           print(f"  - side_info: noise_snr.csv")
+           print(f"  - merged_points: PointCloud_snr.csv")
           
        except Exception as e:
            logging.error(f"Error creating CSV files: {e}")
@@ -188,6 +231,7 @@ class RadarApplication:
        buffer = b""  # Initialize an empty buffer to accumulate data
        magic_word_pattern = b"\x02\x01\x04\x03\x06\x05\x08\x07"
        expected_header_length = 40  # Length of the frame header
+       max_packet_length = 256 * 1024  # Guard against corrupted packet length fields
        max_buffer_size = 10 * 1024 * 1024  # Set a reasonable buffer size limit (10 MB)
        discard_threshold = 1024  # Log significant discards only
        debug_log_interval = 100  # Log buffer state every 100 iterations
@@ -203,6 +247,9 @@ class RadarApplication:
                    byte_count = device.data_port.in_waiting
                    if byte_count > 0:
                        raw_data = device.data_port.read(byte_count)
+                       self.raw_bytes_received += len(raw_data)
+                       if not self.last_data_preview_hex:
+                           self.last_data_preview_hex = raw_data[:32].hex(' ')
                        # print("Data received ... ")
                        buffer += raw_data  # Append new data to the buffer
 
@@ -217,6 +264,10 @@ class RadarApplication:
                            # Look for the magic word in the buffer
                            magic_word_index = buffer.find(magic_word_pattern)
                            if magic_word_index == -1:
+                               # Keep only enough trailing bytes to detect a split magic word
+                               # on the next UART read and discard the rest as unaligned data.
+                               if len(buffer) > (len(magic_word_pattern) - 1):
+                                   buffer = buffer[-(len(magic_word_pattern) - 1):]
                                break  # No valid frame header found yet
 
 
@@ -232,6 +283,28 @@ class RadarApplication:
 
                            frame_header = buffer[:expected_header_length]
                            total_packet_length = int.from_bytes(frame_header[12:16], byteorder='little')
+                           num_tlvs = int.from_bytes(frame_header[32:36], byteorder='little')
+
+                           # Corrupted headers can create false frame boundaries and large unaligned discards.
+                           if (
+                               total_packet_length < expected_header_length
+                               or total_packet_length > max_packet_length
+                               or (total_packet_length % 4) != 0
+                           ):
+                               self.invalid_header_count += 1
+                               if self.invalid_header_count % 200 == 0:
+                                   logging.warning(
+                                       "Rejected %d candidate headers. last_total_len=%s last_num_tlvs=%s preview=%s",
+                                       self.invalid_header_count,
+                                       total_packet_length,
+                                       num_tlvs,
+                                       self.last_data_preview_hex,
+                                   )
+                               buffer = buffer[1:]
+                               continue
+
+                           if self.first_candidate_packet_length == 0:
+                               self.first_candidate_packet_length = total_packet_length
 
 
                            if len(buffer) < total_packet_length:
@@ -301,7 +374,18 @@ class RadarApplication:
                    frame_header = data[:40]
                    parsed_header = self.parser.parse_frame_header(frame_header)
                    num_tlvs = parsed_header.get("Num TLVs", 0) if parsed_header else 0
-                   tlv_data = self.parse_tlvs(data[40:], window, num_tlvs=num_tlvs)
+                   tlv_data_40 = self.parse_tlvs(data[40:], window, num_tlvs=num_tlvs)
+                   tlv_data = tlv_data_40
+
+                   # Some firmware streams include extra bytes after the frame header.
+                   # If offset 40 yields no TLVs, try offset 52 and keep the richer parse.
+                   if len(data) > 52:
+                       tlv_data_52 = self.parse_tlvs(data[52:], window, num_tlvs=num_tlvs)
+                       if len(tlv_data_52) > len(tlv_data_40):
+                           tlv_data = tlv_data_52
+                           if not self._alt_tlv_offset_logged:
+                               logging.info("Using alternate TLV payload offset 52 for this stream.")
+                               self._alt_tlv_offset_logged = True
                    self.parsed_frames += 1
 
                    if self.parsed_frames % 20 == 0:
@@ -388,14 +472,18 @@ class RadarApplication:
            if count_header_mode == target_tlvs and count_payload_mode != target_tlvs:
                return parsed_header_mode
            if count_payload_mode == target_tlvs and count_header_mode != target_tlvs:
-               logging.info("TLV parser selected payload-only length mode.")
+               if not self._payload_length_mode_logged:
+                   logging.info("TLV parser selected payload-only length mode.")
+                   self._payload_length_mode_logged = True
                return parsed_payload_mode
 
        header_score = (count_header_mode, consumed_header_mode)
        payload_score = (count_payload_mode, consumed_payload_mode)
        if payload_score > header_score:
            if count_payload_mode > 0:
-               logging.info("TLV parser selected payload-only length mode.")
+               if not self._payload_length_mode_logged:
+                   logging.info("TLV parser selected payload-only length mode.")
+                   self._payload_length_mode_logged = True
            return parsed_payload_mode
 
        return parsed_header_mode
@@ -417,7 +505,12 @@ class RadarApplication:
            self.frame_count += 1
           
            if parsed_header:
-               window.update_specified_table('header_table', parsed_header)
+               with self.ui_data_lock:
+                   self.latest_header = parsed_header
+                   self._dirty_header = True
+
+           frame_points = None
+           frame_side_info = None
 
 
            for tlv in tlv_data:
@@ -426,10 +519,14 @@ class RadarApplication:
 
 
                if tlv_type == 6:  # Statistics
-                   window.update_specified_table('statistics_table', tlv_info)
+                   with self.ui_data_lock:
+                       self.latest_statistics = tlv_info
+                       self._dirty_statistics = True
                       
                elif tlv_type == 9:  # Temperature
-                   window.update_specified_table('temperature_table', tlv_info)
+                   with self.ui_data_lock:
+                       self.latest_temperature = tlv_info
+                       self._dirty_temperature = True
                       
                elif tlv_type == 2:  # Range Profile
                    self.range_profile = tlv_info
@@ -456,52 +553,119 @@ class RadarApplication:
                            self._write_to_csv(self.csv_files['range_doppler_heatmap'], heatmap_data)
                elif tlv_type == 1:  # Detected Points
                    self.detected_points = tlv_info
-                   window.update_specified_table('detected_points_table', tlv_info)
-                   if self.csv_directory and 'detected_points' in self.csv_files and tlv_info:
-                       points_data = []
-                       for i, point in enumerate(tlv_info):
-                           x = point.get('X', 0)
-                           y = point.get('Y', 0)
-                           z = point.get('Z', 0)
-                           # Calculate range as sqrt(x^2 + y^2 + z^2)
-                           range_val = np.sqrt(x*x + y*y + z*z)
-                           # Calculate Angle of Arrival (AoA) as arctan(y/x) in degrees
-                           aoa = np.degrees(np.arctan2(y, x))  # arctan2 handles all quadrants correctly
-                           points_data.append([
-                               self.frame_count,
-                               i,
-                               x,
-                               y,
-                               z,
-                               point.get('Doppler', 0),
-                               range_val,
-                               aoa
-                           ])
-                       if points_data:
-                           self._write_to_csv(self.csv_files['detected_points'], points_data)
+                   frame_points = tlv_info
+                   with self.ui_data_lock:
+                       self.latest_detected_points = tlv_info
+                       self._dirty_detected_points = True
                           
                elif tlv_type == 7:  # Side Info
                    self.side_info_for_detected_points = tlv_info
-                   window.update_specified_table('points_info_table', tlv_info)
-                   if self.csv_directory and 'side_info' in self.csv_files and tlv_info:
-                       side_data = []
-                       for i, info in enumerate(tlv_info):
-                           side_data.append([
-                               elapsed_s,
-                               self.frame_count,
-                               i,
-                               info.get('snr', 0),
-                               info.get('noise', 0)
-                           ])
-                       if side_data:
-                           self._write_to_csv(self.csv_files['side_info'], side_data)
+                   frame_side_info = tlv_info
+                   with self.ui_data_lock:
+                       self.latest_side_info = tlv_info
+                       self._dirty_side_info = True
+
+           if self.csv_directory and 'merged_points' in self.csv_files and frame_points:
+               merged_points_data = []
+               for i, point in enumerate(frame_points):
+                   x = point.get('X', 0)
+                   y = point.get('Y', 0)
+                   z = point.get('Z', 0)
+                   doppler = point.get('Doppler', 0)
+                   # Calculate range as sqrt(x^2 + y^2 + z^2)
+                   range_val = np.sqrt(x * x + y * y + z * z)
+                   # Calculate Angle of Arrival (AoA) as arctan(y/x) in degrees
+                   aoa = np.degrees(np.arctan2(y, x))  # arctan2 handles all quadrants correctly
+
+                   snr = None
+                   noise = None
+                   if frame_side_info and i < len(frame_side_info):
+                       snr = frame_side_info[i].get('snr', None)
+                       noise = frame_side_info[i].get('noise', None)
+
+                   merged_points_data.append([
+                       elapsed_s,
+                       self.frame_count,
+                       i,
+                       x,
+                       y,
+                       z,
+                       doppler,
+                       range_val,
+                       aoa,
+                       snr,
+                       noise
+                   ])
+
+               if merged_points_data:
+                   self._write_to_csv(self.csv_files['merged_points'], merged_points_data)
                           
        except Exception as e:
            logging.error(f"Error handling data: {e}")
 
 
+   def _flush_ui_updates(self, window):
+       updates = []
+       with self.ui_data_lock:
+           if self._dirty_header and self.latest_header is not None:
+               updates.append(('header_table', self.latest_header))
+               self._dirty_header = False
+           if self._dirty_statistics and self.latest_statistics is not None:
+               updates.append(('statistics_table', self.latest_statistics))
+               self._dirty_statistics = False
+           if self._dirty_temperature and self.latest_temperature is not None:
+               updates.append(('temperature_table', self.latest_temperature))
+               self._dirty_temperature = False
+           if self._dirty_detected_points and self.latest_detected_points is not None:
+               updates.append(('detected_points_table', self.latest_detected_points))
+               self._dirty_detected_points = False
+           if self._dirty_side_info and self.latest_side_info is not None:
+               updates.append(('points_info_table', self.latest_side_info))
+               self._dirty_side_info = False
+
+       for table_id, content in updates:
+           window.update_specified_table(table_id, content)
+
+
    def update_plots_wrapper(self, window):
        """Wrapper function to update plots with new data."""
+       self._flush_ui_updates(window)
+
+       if self.session_started_at and not self.no_data_warning_issued and self.received_frames == 0:
+           if (time.time() - self.session_started_at) > 3.0:
+               if self.raw_bytes_received == 0:
+                   warning_msg = (
+                       "Warning: No bytes received on Data port after sensorStart. "
+                       "Data COM may be wrong/disconnected. Reconnect and try swapping Data/Command selection."
+                   )
+               else:
+                   if (
+                       self.first_candidate_packet_length > 0
+                       and self.raw_bytes_received < self.first_candidate_packet_length
+                   ):
+                       warning_msg = (
+                           "Warning: Data bytes are arriving but the first full packet is not complete yet. "
+                           f"bytes_received={self.raw_bytes_received}, expected_packet={self.first_candidate_packet_length}. "
+                           "Increase frameCfg periodicity (e.g. 300 ms) or reduce heavy guiMonitor outputs. "
+                           f"First bytes: {self.last_data_preview_hex}"
+                       )
+                   else:
+                       warning_msg = (
+                           "Warning: Data bytes are arriving but no valid frames were parsed. "
+                           "Check Data baud rate (921600), firmware/profile compatibility, and frame header integrity. "
+                           f"First bytes: {self.last_data_preview_hex}"
+                       )
+
+               window.command_textbox.appendPlainText(warning_msg)
+               logging.warning(
+                   "%s raw_bytes=%s received_frames=%s parsed_frames=%s",
+                   warning_msg,
+                   self.raw_bytes_received,
+                   self.received_frames,
+                   self.parsed_frames,
+               )
+               self.no_data_warning_issued = True
+
        radar_params = getattr(window, "radar_params", None)
        # unambiguous_range_m = radar_params.get("Unambiguous Range [m]", 10)
        maximum_range = radar_params.get("Maximum Range [m]", 10)
@@ -638,6 +802,7 @@ class RadarApplication:
            noise = np.array([[point['noise']] for point in self.side_info_for_detected_points])
            # print("snr = ", self.snr)
            # print("noise = ", self.noise)
+
 
 
 

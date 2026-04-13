@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                              QWidget, QPushButton, QLabel, QComboBox, QSlider, QSpinBox,
-                             QFileDialog, QInputDialog)
+                             QFileDialog)
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QImage
 import pyqtgraph as pg
@@ -105,16 +105,10 @@ class RangeDopplerPlayback(QMainWindow):
         self.stop_button.clicked.connect(self.stop_playback)
         control_layout.addWidget(self.stop_button)
 
-        # Export single whole-session plot
-        self.export_button = QPushButton("Export Whole Plot")
-        self.export_button.setMinimumWidth(130)
-        self.export_button.clicked.connect(self.export_whole_plot)
-        control_layout.addWidget(self.export_button)
-
-        self.export_activity_button = QPushButton("Export Activity Plot")
-        self.export_activity_button.setMinimumWidth(150)
-        self.export_activity_button.clicked.connect(self.export_activity_plot)
-        control_layout.addWidget(self.export_activity_button)
+        self.show_session_sum_button = QPushButton("Show Session Plot")
+        self.show_session_sum_button.setMinimumWidth(140)
+        self.show_session_sum_button.clicked.connect(self.show_current_session_pattern_plot)
+        control_layout.addWidget(self.show_session_sum_button)
 
         self.video_button = QPushButton("Save Video")
         self.video_button.setMinimumWidth(100)
@@ -278,9 +272,12 @@ class RangeDopplerPlayback(QMainWindow):
         if not activity_name:
             return
 
+        is_initial_load = self.current_activity is None
         self.stop_playback()
         self.current_activity = activity_name
         self.load_range_doppler_data(activity_name)
+        if not is_initial_load:
+            self.show_activity_session_pattern_figure(activity_name)
 
     def on_dataset_changed(self, dataset_path):
         """Handle dataset selection change"""
@@ -468,6 +465,14 @@ class RangeDopplerPlayback(QMainWindow):
 
         return filtered_heatmaps, removed_frames
 
+    def fit_view_to_heatmap_bounds(self):
+        """Force the plot view to match current heatmap physical bounds exactly."""
+        vb = self.heatmap_plot.getViewBox()
+        x_min, x_max = 0.0, float(self.maximum_range)
+        y_min, y_max = -float(self.unambiguous_velocity), float(self.unambiguous_velocity)
+        vb.setLimits(xMin=x_min, xMax=x_max, yMin=y_min, yMax=y_max)
+        vb.setRange(xRange=(x_min, x_max), yRange=(y_min, y_max), padding=0.0)
+
     def update_display(self):
         """Update the heatmap display with current frame (matching live radar exactly)"""
         if not self.heatmaps or self.current_frame >= len(self.heatmaps):
@@ -515,6 +520,7 @@ class RangeDopplerPlayback(QMainWindow):
             0, -self.unambiguous_velocity,  # x_start, y_start
             self.maximum_range, 2 * self.unambiguous_velocity  # width, height
         )
+        self.fit_view_to_heatmap_bounds()
 
         # Update frame label
         self.frame_label.setText(f"Frame: {self.current_frame + 1} / {len(self.heatmaps)}")
@@ -686,198 +692,122 @@ class RangeDopplerPlayback(QMainWindow):
                     pass
             self.status_label.setText(f"Video export failed: {e}")
 
-    def export_whole_plot(self):
-        """Export one single playback-matched plot using sum aggregation over all loaded frames."""
+    def preprocess_frame_for_display(self, frame):
+        """Apply the same transform chain used by playback for one frame."""
+        shifted = np.fft.fftshift(frame, axes=1)
+        desired_rows = max(self.grid_size, shifted.shape[0])
+        desired_cols = max(self.grid_size, shifted.shape[1])
+        scale_y = desired_rows / shifted.shape[0]
+        scale_x = desired_cols / shifted.shape[1]
+        interp = zoom(shifted, (scale_y, scale_x), order=1)
+
+        denom = max(self.max_value - self.min_value, 1e-9)
+        return (interp - self.min_value) / denom
+
+    def build_session_pattern_plot_data(self, heatmaps):
+        """Build one session-level plot by combining all frames with max-hold (spike-preserving)."""
+        if not heatmaps:
+            return np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+
+        base_shape = heatmaps[0].shape
+        valid_frames = [h for h in heatmaps if h.shape == base_shape]
+        if not valid_frames:
+            valid_frames = heatmaps
+
+        processed = [self.preprocess_frame_for_display(h).astype(np.float32) for h in valid_frames]
+        return np.max(np.stack(processed, axis=0), axis=0)
+
+    def show_current_session_pattern_plot(self):
+        """Display one combined plot for the currently loaded session."""
         if not self.heatmaps:
-            self.status_label.setText("Error: No data loaded to export")
+            self.status_label.setText("Error: No session loaded")
             return
 
-        whole = self.build_summed_plot_data(self.heatmaps)
+        pattern = self.build_session_pattern_plot_data(self.heatmaps)
 
-        safe_name = (self.current_activity or "session").replace("/", "_").replace("\\", "_")
-        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_playback_whole_sum.png"
+        cmap = plt.get_cmap('jet')
+        lookup_table = (cmap(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
+        self.heatmap_item.setLookupTable(lookup_table[:, :3])
+        self.heatmap_item.setImage(pattern)
+        self.heatmap_item.setLevels([0, 1])
 
-        default_title = self.current_activity or ""
-        self.save_sum_plot(whole, default_path, "Save Whole-Session Plot", default_title)
-
-    def export_activity_plot(self):
-        """Export one summed plot for all sessions matching a selected activity name."""
-        if not self.activity_map:
-            self.status_label.setText("Error: No activities available")
-            return
-
-        activity_groups = {}
-        for sample_dir in self.activity_map.values():
-            group_label, _ = self.extract_activity_group_label(sample_dir)
-            activity_groups.setdefault(group_label, []).append(sample_dir)
-
-        activity_names = sorted(activity_groups.keys())
-        if not activity_names:
-            self.status_label.setText("Error: No activity folders found")
-            return
-
-        default_activity = None
-        if self.current_activity in self.activity_map:
-            default_activity, _ = self.extract_activity_group_label(self.activity_map[self.current_activity])
-        default_index = activity_names.index(default_activity) if default_activity in activity_names else 0
-
-        activity_name, ok = QInputDialog.getItem(
-            self,
-            "Select Activity",
-            "Choose activity to aggregate across sessions:",
-            activity_names,
-            default_index,
-            False,
+        self.heatmap_item.setRect(
+            0,
+            -self.unambiguous_velocity,
+            self.maximum_range,
+            2 * self.unambiguous_velocity,
         )
-        if not ok or not activity_name:
-            self.status_label.setText("Export canceled")
+        self.fit_view_to_heatmap_bounds()
+
+        self.current_frame = 0
+        self.frame_label.setText(f"Session Plot | frames: {len(self.heatmaps)}")
+        self.status_label.setText("Showing single combined plot for current session")
+
+    def show_activity_session_pattern_figure(self, activity_name):
+        """Show side-by-side session-level combined plots for the selected activity."""
+        sample_dir = self.activity_map.get(activity_name)
+        if sample_dir is None:
             return
 
-        matched_dirs = activity_groups.get(activity_name, [])
-        if not matched_dirs:
-            self.status_label.setText(f"Error: No sessions found for activity '{activity_name}'")
-            return
+        activity_root = sample_dir.parent
+        session_dirs = sorted(
+            [
+                child
+                for child in activity_root.iterdir()
+                if child.is_dir() and (child / "range_doppler.csv").exists()
+            ],
+            key=lambda p: p.name,
+        )
+        if not session_dirs:
+            session_dirs = [sample_dir]
 
-        all_heatmaps = []
-        for sample_dir in matched_dirs:
-            csv_path = sample_dir / "range_doppler.csv"
+        plots = []
+        for sdir in session_dirs:
+            csv_path = sdir / "range_doppler.csv"
             if not csv_path.exists():
                 continue
             try:
                 heatmaps, _ = self.load_heatmaps_from_csv(csv_path)
-                all_heatmaps.extend(heatmaps)
+                if not heatmaps:
+                    continue
+                pattern = self.build_session_pattern_plot_data(heatmaps)
+                plots.append((sdir.name, pattern, len(heatmaps)))
             except Exception as e:
                 print(f"Skipping {csv_path}: {e}")
 
-        if not all_heatmaps:
-            self.status_label.setText(f"Error: Could not load valid frames for '{activity_name}'")
+        if not plots:
             return
 
-        whole = self.build_summed_plot_data(all_heatmaps)
+        n = len(plots)
+        cols = min(3, n)
+        rows = int(np.ceil(n / cols))
+        fig, axes = plt.subplots(rows, cols, figsize=(5.5 * cols, 4.2 * rows), squeeze=False)
 
-        safe_name = activity_name.replace("/", "_").replace("\\", "_")
-        default_path = Path(__file__).parent / "Picture" / f"{safe_name}_all_sessions_whole_sum.png"
-        default_title = f"{activity_name} (all sessions)"
-        self.save_sum_plot(whole, default_path, "Save Whole-Activity Plot", default_title)
-        self.status_label.setText(
-            f"Saved whole activity plot for {activity_name} | "
-            f"sessions: {len(matched_dirs)}, frames: {len(all_heatmaps)}"
-        )
+        for idx, (session_name, pattern, frame_count) in enumerate(plots):
+            r = idx // cols
+            c = idx % cols
+            ax = axes[r][c]
+            im = ax.imshow(
+                pattern.T,
+                origin='lower',
+                aspect='auto',
+                cmap='jet',
+                vmin=0.0,
+                vmax=1.0,
+                extent=[0.0, self.maximum_range, -self.unambiguous_velocity, self.unambiguous_velocity],
+            )
+            ax.set_title(f"{session_name} | frames={frame_count}")
+            ax.set_xlabel("Range [m]")
+            ax.set_ylabel("Speed [m/s]")
 
-    def extract_activity_group_label(self, sample_dir):
-        """Return scope-aware activity label, e.g., 'Single Activity Data | Sitting'."""
-        try:
-            rel_parts = sample_dir.relative_to(self.dataset_root).parts
-        except Exception:
-            rel_parts = sample_dir.parts
+        for idx in range(n, rows * cols):
+            r = idx // cols
+            c = idx % cols
+            axes[r][c].axis('off')
 
-        def is_distance_like(name):
-            txt = name.strip().lower().replace(" ", "")
-            if txt.endswith("m"):
-                txt = txt[:-1]
-            if not txt:
-                return False
-            try:
-                float(txt)
-                return True
-            except ValueError:
-                return False
-
-        def is_grouping_folder(name):
-            txt = name.strip().lower()
-            if not txt:
-                return False
-            # Social behavior often has middle folders like "2 People" or "3 people (update)"
-            return "people" in txt
-
-        scope = rel_parts[0].strip() if len(rel_parts) > 0 else self.dataset_root.name
-        activity = None
-
-        for part in reversed(rel_parts):
-            p = part.strip()
-            pl = p.lower()
-            if not p:
-                continue
-            if pl.startswith("dataset"):
-                continue
-            if is_distance_like(p):
-                continue
-            if is_grouping_folder(p):
-                continue
-            if p == scope:
-                continue
-            activity = p
-            break
-
-        if not activity:
-            activity = sample_dir.name
-
-        return f"{scope} | {activity}", activity
-
-    def build_summed_plot_data(self, heatmaps):
-        """Create one summed playback-matched matrix from a list of frame heatmaps."""
-        processed = []
-        for frame in heatmaps:
-            shifted = np.fft.fftshift(frame, axes=1)
-
-            desired_rows = max(self.grid_size, shifted.shape[0])
-            desired_cols = max(self.grid_size, shifted.shape[1])
-            scale_y = desired_rows / shifted.shape[0]
-            scale_x = desired_cols / shifted.shape[1]
-            interp = zoom(shifted, (scale_y, scale_x), order=1)
-
-            denom = max(self.max_value - self.min_value, 1e-9)
-            norm = (interp - self.min_value) / denom
-            processed.append(norm.astype(np.float32))
-
-        return np.sum(np.stack(processed, axis=0), axis=0)
-
-    def save_sum_plot(self, whole, default_path, dialog_title, default_title):
-        """Prompt output path/title and save one summed heatmap figure."""
-        save_path_str, _ = QFileDialog.getSaveFileName(
-            self,
-            dialog_title,
-            str(default_path),
-            "PNG Files (*.png);;All Files (*)",
-        )
-        if not save_path_str:
-            self.status_label.setText("Export canceled")
-            return False
-
-        save_path = Path(save_path_str)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        title_text, ok = QInputDialog.getText(
-            self,
-            "Plot Title",
-            "Enter plot title (leave blank for no title):",
-            text=default_title,
-        )
-        if not ok:
-            self.status_label.setText("Export canceled")
-            return False
-
-        fig, ax = plt.subplots(figsize=(10, 7))
-        im = ax.imshow(
-            whole.T,
-            origin='lower',
-            aspect='auto',
-            cmap='jet',
-            extent=[0.0, self.maximum_range, -self.unambiguous_velocity, self.unambiguous_velocity],
-        )
-        if title_text.strip():
-            ax.set_title(title_text.strip())
-        ax.set_xlabel('Range [m]')
-        ax.set_ylabel('Doppler [m/s]')
-        cb = fig.colorbar(im, ax=ax)
-        cb.set_label('Summed Normalized Signal')
-        fig.tight_layout()
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-
-        self.status_label.setText(f"Saved whole plot: {save_path}")
-        return True
-
+        fig.suptitle(f"Session Plots: {activity_root.name}")
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.show()
 
 def main():
     app = QApplication(sys.argv)

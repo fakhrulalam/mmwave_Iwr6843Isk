@@ -11,6 +11,7 @@ class RadarDataParser:
         self.radar_params = None  # Placeholder for radar parameters
         self.buffer = b""
         self.expected_length = None
+        self._logged_azimuth_layouts = set()
 
 
     def parse_frame_header(self, frame_header):
@@ -110,18 +111,36 @@ class RadarDataParser:
 
         if radar_params is not None:
             range_fft_size = radar_params.get("Number of Samples per Chirp", None)
-            num_virtual_antennas = radar_params.get("Length of Virtual Array", None)
+            configured_virtual_antennas = radar_params.get("Length of Virtual Array", None)
         else:
             logging.error("Radar parameters are None!")
             return None
 
-        if not range_fft_size or not num_virtual_antennas:
-            logging.error("Range FFT size or Number of Virtual Antennas is not set.")
+        if not range_fft_size:
+            logging.error("Range FFT size is not set.")
             return None
 
-        expected_length = range_fft_size * num_virtual_antennas * 4  # 4 bytes per complex value (Imag + Real)
         actual_length = len(payload)
-        logging.debug(f"Expected length: {expected_length}, Actual length: {actual_length}")
+        bytes_per_antenna = range_fft_size * 4  # 4 bytes per complex value (Imag + Real)
+        if bytes_per_antenna <= 0 or actual_length % bytes_per_antenna != 0:
+            raise ValueError(
+                f"Data length {actual_length} is not compatible with range FFT size {range_fft_size}."
+            )
+
+        inferred_virtual_antennas = actual_length // bytes_per_antenna
+        num_virtual_antennas = int(inferred_virtual_antennas)
+        expected_length = range_fft_size * num_virtual_antennas * 4
+
+        if configured_virtual_antennas and int(configured_virtual_antennas) != num_virtual_antennas:
+            layout_key = (int(configured_virtual_antennas), num_virtual_antennas, int(range_fft_size))
+            if layout_key not in self._logged_azimuth_layouts:
+                logging.warning(
+                    "Azimuth heatmap payload implies %d virtual antennas (configured=%d). "
+                    "Using inferred value for TLV type 4 parsing.",
+                    num_virtual_antennas,
+                    int(configured_virtual_antennas),
+                )
+                self._logged_azimuth_layouts.add(layout_key)
 
         if actual_length != expected_length:
             raise ValueError(

@@ -690,6 +690,7 @@ class MainWindow(QMainWindow, QWidget):
         main_layout.addWidget(self.tab_widget_main)
         main_layout.addWidget(self.browse_config_button)
         main_layout.addWidget(self.connect_button)
+
         main_layout.addWidget(self.send_button)
         main_layout.addWidget(self.stop_device_button)
 
@@ -1521,10 +1522,57 @@ class MainWindow(QMainWindow, QWidget):
             self.command_textbox.appendPlainText("Error: Command port is not connected")
             return
 
+        if not getattr(self.command_port, 'is_open', False):
+            self.command_textbox.appendPlainText("Error: Command port is closed. Reconnect ports before Send Configuration.")
+            return
+
+        if not hasattr(self, 'data_port') or self.data_port is None or not self.data_port_connected:
+            self.command_textbox.appendPlainText(
+                "Error: Data port is not connected. Click Connect to attach both Command and Data ports before Send Configuration."
+            )
+            return
+
+        if not getattr(self.data_port, 'is_open', False):
+            self.command_textbox.appendPlainText("Error: Data port is closed. Reconnect ports before Send Configuration.")
+            return
+
+        # Keep required display streams enabled in outgoing guiMonitor command.
+        self._enforce_required_display_flags()
+        self.on_apply_changes_to_cfg_file_push_button(update_commands=['guiMonitor'])
+
+        # Clear stale bytes from data UART so new session starts with fresh frames.
+        if hasattr(self, 'data_port') and self.data_port is not None and self.data_port_connected:
+            try:
+                self.data_port.reset_input_buffer()
+            except Exception:
+                pass
+
         self.command_textbox.appendPlainText(f"Sending commands to {self.command_port.name}")
         self.command_textbox.appendPlainText("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
+        # Clear stale UART responses so each command is matched to its own reply.
+        try:
+            self.command_port.reset_input_buffer()
+        except Exception:
+            pass
+
         # Loop through the command_table to read commands
+        sensor_start_sent = False
+        sensor_start_done = False
+        session_started = False
+        min_safe_frame_period_ms = 300.0
+
+        try:
+            gui_monitor = self.radar_params.get("GUI Monitor", []) if hasattr(self, 'radar_params') else []
+            high_bandwidth_mode = (
+                len(gui_monitor) > 5
+                and str(gui_monitor[2]) == '1'  # Range Profile
+                and str(gui_monitor[4]) == '1'  # Range Azimuth Heat Map
+                and str(gui_monitor[5]) == '1'  # Range Doppler Heat Map
+            )
+        except Exception:
+            high_bandwidth_mode = True
+
         for row in range(self.command_table.rowCount()):
             # Extract command from the table (e.g., first column, second column)
             command_item = self.command_table.item(row, 0)  # First column: command
@@ -1534,38 +1582,178 @@ class MainWindow(QMainWindow, QWidget):
             if command_item is not None:
                 first_part_command = command_item.text().strip()  # Remove any spaces or newlines
                 parameters = parameter_item.text().strip()
-                full_command = f"{first_part_command} {parameters}"  # Combine command and parameters
+                if first_part_command.lower() == "framecfg" and high_bandwidth_mode:
+                    frame_params = parameters.split()
+                    if len(frame_params) >= 5:
+                        try:
+                            current_period_ms = float(frame_params[4])
+                            if current_period_ms < min_safe_frame_period_ms:
+                                frame_params[4] = str(int(min_safe_frame_period_ms))
+                                parameters = " ".join(frame_params)
+                                parameter_item.setText(parameters)
+                                if hasattr(self, 'radar_params') and isinstance(self.radar_params, dict):
+                                    self.radar_params["Frame Periodicity [ms]"] = min_safe_frame_period_ms
+                                self.command_textbox.appendPlainText(
+                                    f"Adjusted frameCfg periodicity from {current_period_ms:g} ms to "
+                                    f"{int(min_safe_frame_period_ms)} ms for UART throughput with enabled heatmaps."
+                                )
+                        except Exception:
+                            pass
 
+                full_command = f"{first_part_command} {parameters}"  # Combine command and parameters
+                is_sensor_start_cmd = first_part_command.lower() == "sensorstart"
+                if is_sensor_start_cmd:
+                    sensor_start_sent = True
+
+                    if hasattr(self, 'radar_app') and self.radar_app is not None and not session_started:
+                        try:
+                            self.radar_app.start_new_session()
+                            session_started = True
+                            self.command_textbox.appendPlainText(
+                                f"Started new data session: {getattr(self.radar_app, 'data_dir', 'Data')}"
+                            )
+                        except Exception as e:
+                            self.command_textbox.appendPlainText(f"Failed to start new data session: {e}")
+                            return
+
+                    # Ensure sensorStart begins from a clean Data UART buffer.
+                    if hasattr(self, 'data_port') and self.data_port is not None and self.data_port_connected:
+                        try:
+                            self.data_port.reset_input_buffer()
+                        except Exception:
+                            pass
+
+                self.command_textbox.appendPlainText(f"Row {row}: {full_command}")
                 command_bytes = full_command.encode('latin1') + b'\n'
                 self.command_port.write(command_bytes)
-                time.sleep(0.1)
+                response_str = self._read_command_response()
+                if response_str:
+                    formatted_response = response_str.replace("\n", "\n\t")
+                    print(formatted_response)
+                    self.command_textbox.appendPlainText(f"Response : {formatted_response}")
 
-                # Read the response
-                byteCount = self.command_port.in_waiting
-                if byteCount > 0:
-                    response_bytes = self.command_port.read(byteCount)
-                    response_str = response_bytes.decode('latin1').strip().replace("\n", "\n\t")
-                    print(response_str)
-                    self.command_textbox.appendPlainText(f"Response : {response_str}")
+                    response_lc = response_str.lower()
+                    if is_sensor_start_cmd and "done" in response_lc and "error" not in response_lc and "exception" not in response_lc:
+                        sensor_start_done = True
+
+                    if "error" in response_lc or "exception" in response_lc:
+                        self.command_textbox.appendPlainText(
+                            f"Stopped at row {row} due to device error on command: {full_command}"
+                        )
+                        break
             else:
                 print(f"Row {row}: Command is empty or invalid.")
                 self.command_textbox.appendPlainText(f"Row {row}: Command is empty or invalid.")
 
+        # Fallback: if sensorStart command is not in the table, send it explicitly.
+        if not sensor_start_sent:
+            self.command_textbox.appendPlainText(
+                "sensorStart was not found in command table; sending fallback command: sensorStart"
+            )
+
+            if hasattr(self, 'radar_app') and self.radar_app is not None and not session_started:
+                try:
+                    self.radar_app.start_new_session()
+                    session_started = True
+                    self.command_textbox.appendPlainText(
+                        f"Started new data session: {getattr(self.radar_app, 'data_dir', 'Data')}"
+                    )
+                except Exception as e:
+                    self.command_textbox.appendPlainText(f"Failed to start new data session: {e}")
+                    return
+
+            if hasattr(self, 'data_port') and self.data_port is not None and self.data_port_connected:
+                try:
+                    self.data_port.reset_input_buffer()
+                except Exception:
+                    pass
+
+            fallback_cmd = b'sensorStart\n'
+            self.command_port.write(fallback_cmd)
+            response_str = self._read_command_response()
+            if response_str:
+                formatted_response = response_str.replace("\n", "\n\t")
+                self.command_textbox.appendPlainText(f"Response : {formatted_response}")
+                response_lc = response_str.lower()
+                if "done" in response_lc and "error" not in response_lc and "exception" not in response_lc:
+                    sensor_start_done = True
+            sensor_start_sent = True
+
         self.command_textbox.appendPlainText("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        if sensor_start_sent and not sensor_start_done:
+            self.command_textbox.appendPlainText(
+                "Warning: sensorStart did not return a clean 'Done' response. Data stream may not start."
+            )
+
+        if sensor_start_done and hasattr(self, 'radar_app') and self.radar_app is not None:
+            time.sleep(0.8)
+            raw_bytes = getattr(self.radar_app, 'raw_bytes_received', 0)
+            received_frames = getattr(self.radar_app, 'received_frames', 0)
+            parsed_frames = getattr(self.radar_app, 'parsed_frames', 0)
+            preview_hex = getattr(self.radar_app, 'last_data_preview_hex', '')
+            first_packet_len = getattr(self.radar_app, 'first_candidate_packet_length', 0)
+            if raw_bytes == 0:
+                data_name = getattr(self.data_port, 'name', 'UnknownDataPort')
+                cmd_name = getattr(self.command_port, 'name', 'UnknownCommandPort')
+                warn_msg = (
+                    "Post-start check: no bytes on Data port. "
+                    f"Current mapping Command={cmd_name}, Data={data_name}. "
+                    "Likely wrong COM mapping or disconnected cable."
+                )
+                self.command_textbox.appendPlainText(warn_msg)
+                logging.warning(warn_msg)
+            elif received_frames == 0:
+                if first_packet_len > 0 and raw_bytes < first_packet_len:
+                    info_msg = (
+                        "Post-start check: Data bytes seen; waiting for first complete packet. "
+                        f"bytes={raw_bytes}, expected_packet={first_packet_len}."
+                    )
+                    self.command_textbox.appendPlainText(info_msg)
+                    logging.info(info_msg)
+                else:
+                    warn_msg = (
+                        "Post-start check: Data bytes seen but no valid radar frames yet. "
+                        f"Verify Data baud=921600 and profile/firmware compatibility. First bytes: {preview_hex}"
+                    )
+                    self.command_textbox.appendPlainText(warn_msg)
+                    logging.warning(
+                        "%s raw_bytes=%s received_frames=%s parsed_frames=%s",
+                        warn_msg,
+                        raw_bytes,
+                        received_frames,
+                        parsed_frames,
+                    )
         # self.send_button.setEnabled(False)
         time.sleep(0.2)
 
+    def _read_command_response(self, idle_timeout_s=0.15, max_wait_s=1.0):
+        """Read command-port response until UART is idle for a short window."""
+        start_time = time.time()
+        last_data_time = start_time
+        response_chunks = []
+
+        while time.time() - start_time < max_wait_s:
+            byte_count = self.command_port.in_waiting
+            if byte_count > 0:
+                response_chunks.append(self.command_port.read(byte_count))
+                last_data_time = time.time()
+            elif response_chunks and (time.time() - last_data_time) >= idle_timeout_s:
+                break
+
+            time.sleep(0.02)
+
+        if not response_chunks:
+            return ""
+
+        return b"".join(response_chunks).decode('latin1', errors='replace').strip()
+
     def stop_device(self):
         self.command_port.write(b'sensorStop \n')
-        time.sleep(0.1)
-
-        # Read the response
-        byteCount = self.command_port.in_waiting
-        if byteCount > 0:
-            response_bytes = self.command_port.read(byteCount)
-            response_str = response_bytes.decode('latin1').strip().replace("\n", "\n\t")
-            print(response_str)
-            self.command_textbox.appendPlainText(f"Response : {response_str}")
+        response_str = self._read_command_response()
+        if response_str:
+            formatted_response = response_str.replace("\n", "\n\t")
+            print(formatted_response)
+            self.command_textbox.appendPlainText(f"Response : {formatted_response}")
 
     def on_plot_selection_toggled(self, state, row, param):
         """
@@ -1580,6 +1768,17 @@ class MainWindow(QMainWindow, QWidget):
         print(f"State: {state}, Row: {row}, Param: {param}")
         # Convert state to a boolean
         is_checked = state == Qt.Checked  # True if checked, False otherwise
+
+        required_display_params = {
+            "Range Profile": 2,
+            "Range Azimuth Heat Map": 4,
+            "Range Doppler Heat Map": 5,
+        }
+
+        if param in required_display_params and not is_checked:
+            self.radar_params["GUI Monitor"][required_display_params[param]] = "1"
+            self._set_display_checkbox_checked(param, True)
+            is_checked = True
 
         calculated_params = {}
 
@@ -1936,7 +2135,32 @@ class MainWindow(QMainWindow, QWidget):
             selected_waveform = 'TDM-MIMO'
         return selected_waveform
 
+    def _enforce_required_display_flags(self):
+        """Always keep key plots enabled in GUI Monitor state."""
+        gui_monitor = self.radar_params.get("GUI Monitor", [])
+        if not isinstance(gui_monitor, list) or len(gui_monitor) < 7:
+            return
+
+        # guiMonitor: [-1, scatter, rangeProfile, noise, rangeAzimuth, rangeDoppler, stats]
+        for index in (2, 4, 5):
+            gui_monitor[index] = "1"
+
+        self.radar_params["GUI Monitor"] = [str(value) for value in gui_monitor]
+
+    def _set_display_checkbox_checked(self, param_name, checked):
+        row = self.find_row_by_value(self.display_table, param_name)
+        if row == -1:
+            return
+
+        check_box = self.display_table.cellWidget(row, 1)
+        if isinstance(check_box, QCheckBox):
+            check_box.blockSignals(True)
+            check_box.setChecked(checked)
+            check_box.blockSignals(False)
+
     def set_tables_information(self, radar_params, selected_radar):
+        self._enforce_required_display_flags()
+
         # Chirp Configuration Table Information
         chirp_cfg_info = {
             "Antenna Config": 0,  # Placeholder
@@ -2239,15 +2463,11 @@ class MainWindow(QMainWindow, QWidget):
 
         # Send the command over the command port
         self.command_port.write(command_bytes)
-        time.sleep(0.1)  # Wait for a short time to allow the command to be processed
-
-        # Read the response from the device
-        byteCount = self.command_port.in_waiting
-        if byteCount > 0:
-            response_bytes = self.command_port.read(byteCount)
-            response_str = response_bytes.decode('latin1').strip().replace("\n", "\n\t")
-            print(response_str)
-            self.command_textbox.appendPlainText(f"Response: {response_str}")
+        response_str = self._read_command_response()
+        if response_str:
+            formatted_response = response_str.replace("\n", "\n\t")
+            print(formatted_response)
+            self.command_textbox.appendPlainText(f"Response: {formatted_response}")
 
         # Set the QLineEdits in the corresponding cells
 
