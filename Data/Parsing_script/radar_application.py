@@ -802,8 +802,3 @@ class RadarApplication:
            noise = np.array([[point['noise']] for point in self.side_info_for_detected_points])
            # print("snr = ", self.snr)
            # print("noise = ", self.noise)
-
-
-
-
-

@@ -132,4 +132,3 @@ class RadarVisualizer:
             range_profile_plot_objects[0][0].setData(x_axis_y1, np.abs(y1))
         if len_y2 > 0:
             range_profile_plot_objects[1][0].setData(x_axis_y2, np.abs(y2))
-
