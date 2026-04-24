@@ -4,14 +4,14 @@ Room Measurement: Front Length: 5.66m, Back wall 3.51m, Height: 3.09m. Width: 4.
 Sensor position: Height: 1.93m, Left width: 1.74m, Right Width: 2.35m
 Subject: height:1.74m
 
-
+* Directional convention was considered based on sensor's viewpoint. 
 
 For the activities Sitting, Standing, and Waving:
 
 * Data was collected at five different distances from the sensor: 1 m, 2 m, 3 m, 4 m.
 * Sitting & Standing: For each sample, while taking sitting data, subject were in standing position, around (8-12)s went to sitting position and remains sitting posture until sensor stops collecting data. Total duration of each samples are around (30-35)s. Standing activity was performed in similar fashion, first sitting posture and then remained standing posture until sensor stops.
 * Waving: subject were standing each distance area and then were waving hands from sensor start collecting data to stop. Total duration was 20s.
-* For 5m distance, we don't have space for the middle and left position in the lab as there is counter top. so I took 3 samples on 5m which are right to the sensors.
+* For 5m distance, we don't have space for the middle and left position in the lab as there is lab bench. so I took 3 samples on 5m which are right to the sensors.
 * At each distance(except 5m distance), three samples were recorded based on horizontal position:
 
  Middle: The subject is positioned directly in front of the sensor at the specified distance.
