@@ -1,0 +1,71 @@
+This dataset is using point cloud and Range-Doppler data for four activities: Sitting, Standing, Waving, and Walking for a single person.
+
+Room Measurement: Front Length: 5.66m, Back wall 3.51m, Height: 3.09m. Width: 4.09m
+Sensor position: Height: 1.93m, Left width: 1.74m, Right Width: 2.35m
+Subject: height:1.74m
+
+
+
+For the activities Sitting, Standing, and Waving:
+
+* Data was collected at five different distances from the sensor: 1 m, 2 m, 3 m, 4 m.
+* Sitting & Standing: For each sample, while taking sitting data, subject were in standing position, around (8-12)s went to sitting position and remains sitting posture until sensor stops collecting data. Total duration of each samples are around (30-35)s. Standing activity was performed in similar fashion, first sitting posture and then remained standing posture until sensor stops.
+* Waving: subject were standing each distance area and then were waving hands from sensor start collecting data to stop. Total duration was 20s.
+* For 5m distance, we don't have space for the middle and left position in the lab as there is counter top. so I took 3 samples on 5m which are right to the sensors.
+* At each distance(except 5m distance), three samples were recorded based on horizontal position:
+
+ Middle: The subject is positioned directly in front of the sensor at the specified distance.
+ Left: The subject is positioned 1 meter to the left of the middle point, while maintaining the same vertical distance from the sensor.
+ Right: The subject is positioned 1 meter to the right of the middle point, at the same vertical distance.
+
+So this three activity has 15 samples each.
+
+
+
+
+Walking Data Collection:
+
+Walking is collected distance-wise similar to other activities.
+At each distance (1 m to 5 m), three walking patterns were recorded:
+
+1. Horizontal Walking:
+   - Subject walks left ↔ right while maintaining the same distance from the sensor
+
+2. Forward-Backward Walking:
+   - Subject starts at a given distance
+   - Moves away toward ~5 m
+   - Moves toward sensor up to ~1 m
+   - Returns to the starting position
+   Example: 3 m → 5 m → 1 m → 3 m
+
+3. Diagonal Walking:
+   - Subject starts from right-side corner at a given distance
+   - Moves diagonally toward far region (~5 m)
+   - Returns diagonally toward near region (~1 m)
+   - Covers both lateral and radial motion
+
+Thus, walking also has:
+5 distances × 3 patterns = 15 samples
+
+
+Additional Random Validation Samples:
+
+- Sitting: 2.5 m, 0.5 m right from middle
+- Standing: 2.5 m, 0.5 m left from middle
+- Waving: 2.5 m, middle
+- Walking: random path
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

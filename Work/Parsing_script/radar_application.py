@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class RadarApplication:
    def __init__(self):
        self._initialize_variables()
+
        self._setup_visualizations()
 
 
@@ -73,6 +74,7 @@ class RadarApplication:
        self._dirty_side_info = False
        self.session_started_at = None
        self.no_data_warning_issued = False
+
    def _setup_visualizations(self):
        """Setup plots for visualizing radar data."""
 
@@ -193,8 +195,17 @@ class RadarApplication:
            with open(self.csv_files['merged_points'], 'w', newline='') as f:
                writer = csv.writer(f)
                writer.writerow([
-                   'timestamp_s', 'frame_number', 'point_index', 'x', 'y', 'z', 'doppler',
-                   'range', 'aoa', 'snr', 'noise'
+                   'timestamp_s',
+                   'frame_number',
+                   'point_index',
+                   'x',
+                   'y',
+                   'z',
+                   'doppler_mps',
+                   'azimuth_deg',
+                   'elevation_deg',
+                   'snr_db',
+                   'noise_db'
                ])
 
 
@@ -206,7 +217,6 @@ class RadarApplication:
        except Exception as e:
            logging.error(f"Error creating CSV files: {e}")
            print(f"✗ Error creating CSV files: {e}")
-
 
    def _write_to_csv(self, filename, data):
        """Write data to CSV file."""
@@ -503,8 +513,10 @@ class RadarApplication:
            else:
                elapsed_s = 0.0
            self.frame_count += 1
+           frame_number = self.frame_count
           
            if parsed_header:
+               frame_number = parsed_header.get('Frame Number', self.frame_count)
                with self.ui_data_lock:
                    self.latest_header = parsed_header
                    self._dirty_header = True
@@ -528,9 +540,6 @@ class RadarApplication:
                        self.latest_temperature = tlv_info
                        self._dirty_temperature = True
                       
-               elif tlv_type == 2:  # Range Profile
-                   self.range_profile = tlv_info
-                          
                elif tlv_type == 3:  # Noise Profile
                    self.noise_profile = tlv_info
                           
@@ -544,7 +553,7 @@ class RadarApplication:
                            for doppler_bin in range(len(tlv_info[range_bin])):
                                heatmap_data.append([
                                    elapsed_s,
-                                   self.frame_count,
+                                   frame_number,
                                    range_bin,
                                    doppler_bin,
                                    tlv_info[range_bin][doppler_bin]
@@ -566,35 +575,44 @@ class RadarApplication:
                        self._dirty_side_info = True
 
            if self.csv_directory and 'merged_points' in self.csv_files and frame_points:
+               side_info_aligned = frame_side_info is not None and len(frame_side_info) == len(frame_points)
+               if frame_side_info is not None and not side_info_aligned:
+                   logging.warning(
+                       'Skipping SNR/noise merge for frame %s due to point/side-info count mismatch (points=%d, side_info=%d).',
+                       frame_number,
+                       len(frame_points),
+                       len(frame_side_info),
+                   )
+
                merged_points_data = []
                for i, point in enumerate(frame_points):
-                   x = point.get('X', 0)
-                   y = point.get('Y', 0)
-                   z = point.get('Z', 0)
+                   x_sensor = point.get('X', 0)
+                   y_sensor = point.get('Y', 0)
+                   z_sensor = point.get('Z', 0)
                    doppler = point.get('Doppler', 0)
-                   # Calculate range as sqrt(x^2 + y^2 + z^2)
-                   range_val = np.sqrt(x * x + y * y + z * z)
-                   # Calculate Angle of Arrival (AoA) as arctan(y/x) in degrees
-                   aoa = np.degrees(np.arctan2(y, x))  # arctan2 handles all quadrants correctly
+
+                   # AoA derived from TLV1 Cartesian coordinates in sensor frame.
+                   azimuth_deg = np.degrees(np.arctan2(y_sensor, x_sensor))
+                   elevation_deg = np.degrees(np.arctan2(z_sensor, np.sqrt(x_sensor * x_sensor + y_sensor * y_sensor)))
 
                    snr = None
                    noise = None
-                   if frame_side_info and i < len(frame_side_info):
+                   if side_info_aligned:
                        snr = frame_side_info[i].get('snr', None)
                        noise = frame_side_info[i].get('noise', None)
 
                    merged_points_data.append([
                        elapsed_s,
-                       self.frame_count,
+                       frame_number,
                        i,
-                       x,
-                       y,
-                       z,
+                       x_sensor,
+                       y_sensor,
+                       z_sensor,
                        doppler,
-                       range_val,
-                       aoa,
+                       azimuth_deg,
+                       elevation_deg,
                        snr,
-                       noise
+                       noise,
                    ])
 
                if merged_points_data:
@@ -802,3 +820,4 @@ class RadarApplication:
            noise = np.array([[point['noise']] for point in self.side_info_for_detected_points])
            # print("snr = ", self.snr)
            # print("noise = ", self.noise)
+
