@@ -1,0 +1,84 @@
+Multi-Person Activity Dataset Two People
+
+The dataset contains point-cloud data and Range-Doppler data for five activities:
+
+1. Sitting
+2. Standing
+3. Splitting
+4. Approaching
+5. Walking Together
+
+Room Measurements
+
+* Front length up to the wall: 5.66 m
+* Back wall length: 3.51 m
+* Room height: 3.09 m
+* Room width: 4.09 m
+
+Sensor Position
+
+* Sensor height: 1.93 m
+* Distance from left wall: 1.74 m
+* Distance from right wall: 2.35 m
+
+Subject Heights
+
+* Subject 1:
+* Subject 2:
+
+Direction Convention:
+
+The directional convention was defined based on the sensor’s viewpoint.
+
+
+
+Data Collection Setup:
+
+Data was collected at five different distances from the sensor:
+
+* 1 m
+* 2 m
+* 3 m
+* 4 m
+* 5 m
+
+For each distance, three samples were collected. One sample was collected directly along the perpendicular direction from the sensor at the marked distance. The other samples were collected with slight left/right variation while maintaining approximately the same distance. In some cases, e.g. 1 m distance, the sample was collected between 1 m and 2 m, but it was still considered a 1 m sample to introduce natural variability into the dataset.
+
+
+
+### Activity Descriptions
+
+Sitting and Standing:
+
+For the Sitting activity, both subjects initially stood for approximately 8–12 seconds. Then, they moved to the sitting position and remained seated until the sensor stopped collecting data. The total duration of each sample was approximately 25-30 seconds. The Standing activity was performed in a similar way. Both subjects initially remained seated, then stood up and stayed in the standing posture until the sensor stopped collecting data.
+
+
+Approaching and Splitting:
+
+For the Approaching activity, two subjects started from distant points in the room and walked toward a marked point corresponding to a specific distance from the sensor. After reaching the marked point, they remained standing for approximately 10 seconds. For collecting three samples at each distance, the subjects maintained approximately the same target distance where they approached or stopped, but marked stopping spot were varied slightly to the left or right of the central point. In some cases, for example at the 1 m distance, the actual marked position was between 1 m and 2 m but was still considered a 1 m sample to add variability. Sometimes the two subjects approached from similar directions, while in other cases they approached from opposite directions to maximize the walking distance within the room.
+
+The Splitting activity was performed in the opposite manner. Both subjects initially stood at the marked distance point for approximately 10 seconds. Then, they moved away from each other toward distant points in the room. Data collection was stopped after they reached those points.
+
+For both Approaching and Splitting, the subjects were asked to walk slowly so that the activity duration became slightly longer. This was necessary because, due to the limited room size, the walking distance was only about 3 m and the activity could otherwise end very quickly.
+
+Walking Together:
+
+For the Walking Together activity, both subjects started walking together from the marked distance point and continued walking until the sensor stopped collecting data. The sensor was usually stopped when the subjects returned close to the starting position.
+
+To collect different samples, the subjects were asked to walk in different directions and patterns, such as circular walking, forward-backward walking, zigzag walking, and slightly varied walking paths.
+
+
+
+### Dataset Summary
+
+The dataset contains:
+
+* 5 activities
+* 5 distances per activity
+* 3 samples per distance
+
+Therefore, the total number of samples is:
+
+5 × 5 × 3 = 75
+
+So, this multi-person activity dataset contains a total of 75 samples.
